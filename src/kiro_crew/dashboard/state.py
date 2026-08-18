@@ -96,6 +96,7 @@ _CHANNEL_LABELS = {
     "wecom": "WeCom",
     "weixin": "WeChat",
     "imessage": "iMessage",
+    "feishu": "Feishu",
 }
 
 

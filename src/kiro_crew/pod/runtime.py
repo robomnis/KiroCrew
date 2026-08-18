@@ -986,7 +986,7 @@ def sanitized_seed_config(seed_dir: Path) -> dict | None:
     # are scrubbed from the pod env by build_pod_env.) iMessage matters most
     # here: it needs no credential at all, so a pod that inherited enabled=true
     # would drive the operator's real Messages.app and reply to real people.
-    for section in ("tunnel", "telegram", "wecom", "imessage"):
+    for section in ("tunnel", "telegram", "wecom", "imessage", "feishu"):
         if not isinstance(data.get(section), dict):
             data[section] = {}
         data[section]["enabled"] = False
@@ -997,8 +997,10 @@ def build_pod_env(cfg: PodConfig, home_dir: Path, port: int, checkout: Path) -> 
     """Construct the isolated gateway environment for a pod.
 
     Scrubs messaging-identity creds so the pod can't inherit and re-use the live
-    plane's Slack / WeCom / Telegram identity via the systemd --user manager env:
-    ``SLACK_*``, ``WECOM_*`` (WECOM_BOT_ID / WECOM_SECRET), and non-AWS ``*_TOKEN``
+    plane's Slack / WeCom / Telegram / Feishu identity via the systemd --user
+    manager env: ``SLACK_*``, ``WECOM_*`` (WECOM_BOT_ID / WECOM_SECRET),
+    ``FEISHU_*`` (FEISHU_APP_ID / FEISHU_APP_SECRET — neither ends in ``_TOKEN``,
+    so the generic predicate below does not reach them), and non-AWS ``*_TOKEN``
     (covers ``TELEGRAM_BOT_TOKEN``). ``AWS_*`` is kept on purpose (pods run agent
     turns), and the ``_TOKEN`` scrub deliberately EXCLUDES ``AWS_`` so
     ``AWS_SESSION_TOKEN`` (temp creds) survives intact — scrubbing it would leave
@@ -1052,6 +1054,7 @@ def build_pod_env(cfg: PodConfig, home_dir: Path, port: int, checkout: Path) -> 
         for k in env
         if k.startswith("SLACK_")
         or k.startswith("WECOM_")
+        or k.startswith("FEISHU_")
         or (k.endswith("_TOKEN") and not k.startswith("AWS_"))
     ]:
         env.pop(key, None)
