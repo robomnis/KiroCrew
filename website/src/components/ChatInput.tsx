@@ -113,6 +113,8 @@ import SlashCommandMenu from './SlashCommandMenu'
 import FilePickerMenu from './FilePickerMenu'
 import type { FileKind } from './FilePickerMenu'
 import SkillPickerMenu from './SkillPickerMenu'
+import { skillsCacheStaleTime } from '../lib/skillsCache'
+import ProjectSkillsTrustDialog from './ProjectSkillsTrustDialog'
 import { matchFileToken, matchSkillToken, replaceTokenAtCaret } from './composerTokens'
 import { useStopEscapeHatch } from '../hooks/useStopEscapeHatch'
 
@@ -1108,6 +1110,17 @@ function ChatInput({
   const [fileQuery, setFileQuery] = useState('')
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
+  // Project skill awaiting consent, together with the exact chat/project/request
+  // that initiated it. A grant can outlive this dialog, so completion must not
+  // write into a different draft or supersede a newer consent request.
+  const nextTrustRequestIdRef = useRef(0)
+  const activeTrustRequestIdRef = useRef<number | null>(null)
+  const [trustPrompt, setTrustPrompt] = useState<{
+    requestId: number
+    leaf: string
+    slotKey?: string
+    project?: string
+  } | null>(null)
   // Open an in-input trigger picker from the + menu (mirrors typing the sigil):
   //  '/' slash commands (whole-input), '@' file mention, '$' skill. Inserts the
   //  sigil at a word boundary, opens the matching picker, then refocuses the box.
@@ -1128,18 +1141,25 @@ function ChatInput({
       if (el) { el.focus(); const n = el.value.length; el.setSelectionRange(n, n) }
     })
   }
-  // Warm the shared ['skills'] cache when the input gains focus so the first
+  // Warm the per-slot-and-project skills cache when the input gains focus so the first
   // `$` trigger renders the picker instantly (the fetch is the only latency).
   // prefetchQuery is a no-op if the cache is already fresh (staleTime), so it's
-  // cheap to call on every focus. Shares the key with SkillPickerMenu + SkillsTab.
+  // cheap to call on every focus. The key and the session key must match
+  // SkillPickerMenu's exactly, or the prefetch warms a different entry and the
+  // menu still pays the fetch on open.
   const queryClient = useQueryClient()
+  const skillSlotKey = slotId ? `dashboard:${slotId}` : undefined
+  const skillSlotKeyRef = useRef(skillSlotKey)
+  skillSlotKeyRef.current = skillSlotKey
+  const skillProjectRef = useRef(project)
+  skillProjectRef.current = project
   const prefetchSkills = useCallback(() => {
     queryClient.prefetchQuery({
-      queryKey: ['skills'],
-      queryFn: () => api.skills(),
-      staleTime: 5 * 60 * 1000,
+      queryKey: ['skills', skillSlotKey ?? null, project ?? null],
+      queryFn: () => api.skills(skillSlotKey),
+      staleTime: skillsCacheStaleTime(project),
     })
-  }, [queryClient])
+  }, [queryClient, skillSlotKey, project])
   // Shared caret-relative token insertion for the @/$ pickers: replace the
   // sigil-token ending at the caret with `token`, commit, and restore the caret
   // just after it. One copy keeps the two onSelect handlers duplication-free.
@@ -2447,13 +2467,58 @@ function ChatInput({
         anchorRef={inputRef as React.RefObject<HTMLElement>}
         open={skillPickerOpen}
         sendOnEnter={sendOnEnter}
+        slotKey={skillSlotKey}
+        project={project}
         onSelect={({ leaf }) => {
           // Token left literal — backend appends the skill body; the user still
           // sees their $token marker. Caret-relative replace via shared helper.
           applyPickedToken(/(^|[\s])\$[a-z0-9/_-]*$/, `$${leaf} `)
           setSkillPickerOpen(false); setSkillQuery('')
         }}
+        onTrustRequest={({ leaf }) => {
+          // An unconsented project skill: close the menu and ask, rather than
+          // inserting a token that would resolve to nothing.
+          setSkillPickerOpen(false); setSkillQuery('')
+          const requestId = nextTrustRequestIdRef.current + 1
+          nextTrustRequestIdRef.current = requestId
+          activeTrustRequestIdRef.current = requestId
+          setTrustPrompt({ requestId, leaf, slotKey: skillSlotKey, project })
+        }}
         onClose={() => { setSkillPickerOpen(false); setSkillQuery('') }}
+      />
+      <ProjectSkillsTrustDialog
+        key={trustPrompt?.requestId ?? 0}
+        open={trustPrompt !== null}
+        skillLeaf={trustPrompt?.leaf ?? ''}
+        slotKey={trustPrompt?.slotKey}
+        onClose={() => {
+          activeTrustRequestIdRef.current = null
+          setTrustPrompt(null)
+        }}
+        onTrusted={leaf => {
+          const completedPrompt = trustPrompt
+          if (
+            !completedPrompt
+            || completedPrompt.requestId !== activeTrustRequestIdRef.current
+          ) return
+          if (
+            completedPrompt.slotKey !== skillSlotKeyRef.current
+            || completedPrompt.project !== skillProjectRef.current
+            || completedPrompt.leaf !== leaf
+          ) {
+            // Retire this prompt only if it is still current. A superseding
+            // request has a different id and must remain open.
+            activeTrustRequestIdRef.current = null
+            setTrustPrompt(current =>
+              current?.requestId === completedPrompt.requestId ? null : current)
+            return
+          }
+          activeTrustRequestIdRef.current = null
+          setTrustPrompt(null)
+          // The grant makes the token resolvable, so insert it now — the user
+          // asked for this skill and has just consented to its directory.
+          applyPickedToken(/(^|[\s])\$[a-z0-9/_-]*$/, `$${completedPrompt.leaf} `)
+        }}
       />
 
       {/* Unified input container — drag-to-resize targets the inner div. */}

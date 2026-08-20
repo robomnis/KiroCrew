@@ -607,6 +607,7 @@ export default function ChatPane({
           onAgentClick={provider.capabilities.agentTemplates ? (rect) => { setAgentBtnRect(rect); agentDD.setOpen(!agentDD.open) } : undefined}
           onModelClick={(rect) => { setModelBtnRect(rect); modelDD.setOpen(!modelDD.open) }}
           approvalMode={displayMode}
+          project={paneSlot?.project ?? ''}
           onUploadFiles={uploadFiles}
           pendingFiles={pendingFiles}
           onRemoveFile={(p) => setPendingFiles((prev) => prev.filter((x) => x !== p))}
