@@ -959,6 +959,9 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # reach a dashboard client (``GET /api/apps/registries``) is protected by
         # refusing a credential-bearing repo outright rather than by redacting it.
         "apps/registry.py",
+        # Operator CLI log hygiene, not a gateway egress path: the harness
+        # redacts provider error text itself and serves no request.
+        "connections/l1_smoke.py",
         # Internal persistence / indexing (the on-disk or in-memory copy), whose
         # user-visible surface is already covered by a registered sink.
         "dashboard/chat_folders.py",
