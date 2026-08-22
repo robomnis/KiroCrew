@@ -13,6 +13,7 @@ from kiro_crew.run_coordinator import (
     MemoryRunCoordinator,
     OwnerLease,
     SQLiteRunCoordinator,
+    SubmitRun,
 )
 from kiro_crew.subagent import SubagentInfo, SubagentManager
 
@@ -112,6 +113,49 @@ async def test_default_shadow_persists_accepted_run(
     )
     assert stored is not None
     assert stored.task == "task"
+
+
+@pytest.mark.asyncio
+async def test_manager_persists_process_identity_through_its_execution_fence() -> None:
+    coordinator = MemoryRunCoordinator()
+    manager = SubagentManager(
+        sessions=MagicMock(),
+        ctx_builder=MagicMock(),
+        coordinator=coordinator,
+    )
+    await coordinator.submit(
+        SubmitRun(
+            run_id="process-run",
+            command_id="process-command",
+            idempotency_key="process-key",
+            payload_hash="process-hash",
+            parent_session="parent-1",
+            agent="researcher",
+            task="task",
+            conversation_key="",
+            operation=CommandOperation.SPAWN,
+        )
+    )
+    claim = await coordinator.claim_command(
+        "process-command",
+        OwnerLease("executor", 9_999_999_999.0),
+    )
+    assert claim is not None
+    info = SubagentInfo(id="process-run", task="task")
+    info._coordinator_command = claim.command
+    info._coordinator_fence = claim.fence
+    info._coordinator_version = claim.run.version
+
+    await manager._coordinator_mark_starting(info)
+    await manager._coordinator_mark_running(info)
+    await manager._coordinator_record_process(info, 4321, "start-1", True)
+
+    stored = await coordinator.get_run("process-run")
+    assert stored is not None
+    assert stored.process_id == 4321
+    assert stored.process_start_id == "start-1"
+    assert stored.process_owned is True
+    assert info._coordinator_version == stored.version
 
 
 @pytest.mark.asyncio
@@ -245,3 +289,23 @@ async def test_manager_shutdown_closes_command_authority() -> None:
     await manager.cancel_all()
 
     manager.command_authority.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_process_identity_persistence_failure_aborts_before_execution(monkeypatch) -> None:
+    sessions = MagicMock()
+    sessions.get_pid.return_value = 4321
+    manager = SubagentManager(
+        sessions=sessions,
+        ctx_builder=MagicMock(),
+        coordinator=MemoryRunCoordinator(),
+    )
+    info = SubagentInfo(id="run-process", task="inspect")
+    manager._coordinator_record_process = AsyncMock(side_effect=OSError("write failed"))
+    monkeypatch.setattr("kiro_crew.subagent.platform_compat.process_start_time", lambda _pid: "s1")
+    monkeypatch.setattr("kiro_crew.subagent.update_state", MagicMock())
+
+    with pytest.raises(OSError, match="write failed"):
+        await manager._record_process_identity(info, "subagent:run-process")
+
+    assert info._pid == 4321

@@ -727,8 +727,9 @@ def test_no_raw_cancel_outside_chokepoint():
         # Shielded terminal-report tasks drained at shutdown — also not managed
         # runs; cancelling them cannot trigger a respawn.
         "report_task.cancel()",
-        # Coordinator lease-heartbeat tasks are observers, not managed runs.
-        # Cancelling them cannot trigger run recovery.
+        # Coordinator reconciliation and lease-heartbeat tasks are observers,
+        # not managed runs. Cancelling them cannot trigger run recovery.
+        "reconcile_task.cancel()",
         "lease_task.cancel()",
         # follow_up watchers (spawn_steer mode="follow_up") — observers, not
         # managed runs: no terminal marker applies, and cancelling one cannot
@@ -753,6 +754,7 @@ def test_no_raw_cancel_outside_chokepoint():
         and "reconcile_task" not in l
         and "recovery_task" not in l
         and "report_task" not in l
+        and "reconcile_task" not in l
         and "lease_task" not in l
     ]
     assert len(generic) == 1, (

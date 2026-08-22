@@ -96,6 +96,10 @@ class RunRecord:
     created_at: float
     updated_at: float
     terminal_at: float | None
+    source_version: str = ""
+    process_id: int = 0
+    process_start_id: str = ""
+    process_owned: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,12 @@ class CommandClaim:
     run: RunRecord | None
     fence: RunFence | None
     command_fence: CommandFence
+
+
+@dataclass(frozen=True)
+class RecoveryClaim:
+    run: RunRecord
+    fence: RunFence
 
 
 @dataclass(frozen=True)
@@ -225,6 +235,34 @@ class CommandReceipt:
     created: bool
 
 
+@dataclass(frozen=True)
+class LegacyRunImport:
+    run_id: str
+    parent_session: str
+    agent: str
+    task: str
+    conversation_key: str
+    observed_state: ObservedState
+    outcome: RunOutcome | None
+    result_path: str
+    error: str
+    created_at: float
+    updated_at: float
+    terminal_at: float | None
+    source_version: str
+    event_type: str = ""
+    destination: str = ""
+    payload_json: str = ""
+    delivery_state: DeliveryState | None = None
+
+
+@dataclass(frozen=True)
+class LegacyImportReceipt:
+    run: RunRecord
+    event: OutboxEvent | None
+    created: bool
+
+
 T = TypeVar("T")
 
 
@@ -240,6 +278,10 @@ class RunCoordinator(Protocol):
 
     async def submit_control(self, request: SubmitControl) -> CoordinatorResult[CommandReceipt]: ...
 
+    async def import_legacy(
+        self, request: LegacyRunImport
+    ) -> CoordinatorResult[LegacyImportReceipt]: ...
+
     async def get_command_by_key(self, idempotency_key: str) -> CommandReceipt | None: ...
 
     async def claim_commands(self, owner: OwnerLease, limit: int) -> list[CommandClaim]: ...
@@ -249,6 +291,13 @@ class RunCoordinator(Protocol):
     ) -> list[CommandClaim]: ...
 
     async def claim_command(self, command_id: str, owner: OwnerLease) -> CommandClaim | None: ...
+
+    async def claim_recovery(
+        self,
+        owner: OwnerLease,
+        limit: int,
+        exclude_run_ids: frozenset[str] = frozenset(),
+    ) -> list[RecoveryClaim]: ...
 
     async def finish_command(
         self,
@@ -272,6 +321,16 @@ class RunCoordinator(Protocol):
 
     async def mark_running(
         self, run_id: str, fence: RunFence, expected_version: int
+    ) -> CoordinatorResult[RunRecord]: ...
+
+    async def record_process(
+        self,
+        run_id: str,
+        fence: RunFence,
+        expected_version: int,
+        process_id: int,
+        process_start_id: str,
+        process_owned: bool,
     ) -> CoordinatorResult[RunRecord]: ...
 
     async def complete(

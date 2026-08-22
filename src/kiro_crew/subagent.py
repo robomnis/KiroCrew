@@ -86,12 +86,14 @@ from kiro_crew.run_coordinator import (
     CommandOperation,
     CoordinatorDecision,
     DeliveryState,
+    LegacyRunImporter,
     OutboxEvent,
     RunCommand,
     RunCompletion,
     RunCoordinator,
     RunFence,
     RunOutcome,
+    RunRecovery,
     SQLiteRunCoordinator,
     SubmitRun,
 )
@@ -1468,6 +1470,11 @@ class SubagentManager:
             self._coordinator,
             self._deliver_outbox_event,
         )
+        self._legacy_run_importer = LegacyRunImporter(self._coordinator)
+        self._run_recovery = RunRecovery(
+            self._coordinator,
+            self._outbox_delivery,
+        )
         self._lifecycle: SubagentLifecycle[SubagentInfo] = SubagentLifecycle()
         # follow_up watchers (spawn_steer mode="follow_up"), keyed by run id.
         # Manager-OWNED on purpose: these tasks can spawn a brand-new run
@@ -1681,8 +1688,33 @@ class SubagentManager:
         """Start the periodic reaper loop.  Call once after the event loop is running."""
         if self._reaper_task is None:
             self._reaper_task = asyncio.create_task(self._reaper_loop())
-            # One-shot orphan reconciliation on startup
-            self._reconcile_task = asyncio.create_task(self._reconcile_orphans())
+            # Coordinator state is authoritative on restart. Legacy folders are
+            # imported read-only before the same fenced recovery policy runs.
+            self._reconcile_task = asyncio.create_task(self._reconcile_startup())
+
+    def _coordinator_active_run_ids(self) -> frozenset[str]:
+        """Fence live manager tasks and locally queued runs from recovery."""
+
+        active = frozenset(
+            run_id
+            for run_id, task in self._tasks.items()
+            if run_id in self._agents and not task.done()
+        )
+        return active | self._scheduler.queued_run_ids()
+
+    async def _reconcile_startup(self) -> None:
+        """Import legacy-only state, recover expired runs, and drain delivery."""
+
+        try:
+            await self._run_recovery.reconcile(
+                importer=self._legacy_run_importer,
+                exclude_run_ids=self._coordinator_active_run_ids(),
+            )
+        except Exception:
+            logger.exception("Coordinator-first subagent recovery failed")
+            # Legacy folder metadata is not a trusted process-ownership record.
+            # A protected-store failure must never fall back to signalling a
+            # process selected only by state.json.
 
     async def _reconcile_orphans(self) -> None:
         """Scan for orphaned agent folders from a prior gateway run.
@@ -2092,7 +2124,12 @@ class SubagentManager:
         while True:
             await asyncio.sleep(_REAPER_INTERVAL)
             now = time.time()
-            await self._drain_pending_outbox()
+            try:
+                await self._run_recovery.reconcile(
+                    exclude_run_ids=self._coordinator_active_run_ids(),
+                )
+            except Exception:
+                logger.warning("Reaper: coordinator recovery failed", exc_info=True)
             if not self._conv_registry_rebuilt:
                 # First pass after (re)start: re-seed the conversation TTL
                 # registry from state.json so promoted conversations survive
@@ -2559,6 +2596,58 @@ class SubagentManager:
             raise RuntimeError(f"coordinator running transition refused: {result.reason.value}")
         info._coordinator_version = result.value.version
         info._coordinator_running = True
+
+    async def _coordinator_record_process(
+        self,
+        info: SubagentInfo,
+        process_id: int,
+        process_start_id: str,
+        process_owned: bool,
+    ) -> None:
+        """Persist fenced process identity before it can authorize recovery cleanup."""
+
+        fence = info._coordinator_fence
+        if fence is None:
+            return
+        result = await self._coordinator.record_process(
+            info.id,
+            fence,
+            info._coordinator_version,
+            process_id,
+            process_start_id,
+            process_owned,
+        )
+        if result.value is None or result.decision is CoordinatorDecision.REJECTED:
+            raise RuntimeError(f"coordinator process record refused: {result.reason.value}")
+        info._coordinator_version = result.value.version
+
+    async def _record_process_identity(self, info: SubagentInfo, session_key: str) -> None:
+        """Persist protected process identity before any child prompt can run."""
+
+        pid = self._sessions.get_pid(session_key)
+        if not pid:
+            return
+        info._pid = pid
+        pid_start_id = await asyncio.to_thread(
+            platform_compat.process_start_time,
+            pid,
+        )
+        try:
+            update_state(
+                info.id,
+                pid=pid,
+                pid_recorded_at=time.time(),
+                pid_start_id=pid_start_id or "",
+                process_owned=True,
+            )
+        except Exception:
+            logger.debug("Failed to mirror PID for %s", info.id, exc_info=True)
+        await self._coordinator_record_process(
+            info,
+            pid,
+            pid_start_id or "",
+            True,
+        )
 
     def _start_coordinator_heartbeat(self, info: SubagentInfo) -> None:
         fence = info._coordinator_fence
@@ -6071,6 +6160,8 @@ class SubagentManager:
             # Detect CC provider to skip permission event loop
             is_cc = self._is_cc_provider(client)
         await self._coordinator_mark_running(info)
+        if info._session_sharing and info._pid:
+            await self._coordinator_record_process(info, info._pid, "", False)
         # Intentionally check info.agent (not resolved `agent`) so only
         # explicitly requested agents skip _SYSTEM_PREFIX (defense-in-depth).
         named_agent = bool(info.agent and _AGENT_NAME_RE.fullmatch(info.agent))
@@ -6136,15 +6227,9 @@ class SubagentManager:
         )
         # Stream results to disk for orchestrated chat.
 
-        # Record PID for orphan recovery
-        try:
-
-            pid = self._sessions.get_pid(session_key)
-            if pid:
-                info._pid = pid  # make available for _write_tombstone
-                update_state(info.id, pid=pid, pid_recorded_at=time.time())
-        except Exception:
-            logger.debug("Failed to record PID for %s", info.id, exc_info=True)
+        # Protected identity is the only restart authority for terminating this
+        # process tree. Failure must abort before the child receives a prompt.
+        await self._record_process_identity(info, session_key)
 
         # Record session_id and provider type for session file cleanup
         try:
@@ -6772,7 +6857,13 @@ class SubagentManager:
         info._shared_provider = provider
         if runtime.pid:
             info._pid = runtime.pid
-            update_state(info.id, pid=runtime.pid, pid_recorded_at=time.time())
+            update_state(
+                info.id,
+                pid=runtime.pid,
+                pid_recorded_at=time.time(),
+                pid_start_id="",
+                process_owned=False,
+            )
         logger.info(
             "Subagent %s using session sharing on runtime PID %s (session %s, key %s)",
             info.id,

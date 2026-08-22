@@ -278,6 +278,36 @@ class TestSessionSharingSpawn:
         assert isinstance(info._shared_provider, AcpSessionProvider)
 
     @pytest.mark.asyncio
+    async def test_shared_session_never_persists_kill_authority(self):
+        """Recovery must not treat the parent runtime as this run's child."""
+        from kiro_crew.subagent import SubagentInfo
+
+        sessions = _mock_sessions(sharing_eligible=True)
+        manager = SubagentManager(
+            sessions=sessions,
+            ctx_builder=_mock_ctx_builder_auto(),
+            is_yolo=lambda: True,
+        )
+        info = SubagentInfo(
+            id="shared1",
+            task="hello",
+            parent_session_key="dashboard:slot1",
+        )
+
+        with patch("kiro_crew.subagent.update_state") as update, patch(
+            "kiro_crew.subagent.platform_compat.process_start_time"
+        ) as process_start_time:
+            provider = await manager._create_shared_session(info, "subagent:shared1", "kirocrew")
+
+        process_start_time.assert_not_called()
+        update.assert_called_once()
+        assert update.call_args.args == ("shared1",)
+        assert update.call_args.kwargs["pid"] == 12345
+        assert update.call_args.kwargs["pid_start_id"] == ""
+        assert update.call_args.kwargs["process_owned"] is False
+        await provider.shutdown()
+
+    @pytest.mark.asyncio
     async def test_shared_session_cleanup_destroys_handle(self):
         """On completion, shared session calls provider.shutdown() not reset()."""
         sessions = _mock_sessions(sharing_eligible=True)
