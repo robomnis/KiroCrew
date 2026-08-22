@@ -102,6 +102,14 @@ The dashboard does **not** flow through `TurnDriver`; it remains unchanged as th
 | `EVENT_COMPACTION_STATUS` | `COMPACTION` |
 | `EVENT_COMPLETE` | `DONE` |
 
+An optional structured-monitor completion hook is orthogonal to rendering. It
+is invoked exactly from the raw `EVENT_COMPLETE` branch, after `DONE`, with the
+event's `TurnUsage` and a disposition derived from its stop reason. A normal
+handler return, command intercept, renderer finalization, or stream exception
+does not manufacture completion evidence. Callback failure is logged and cannot
+change the channel turn's output or error behavior. The hook is absent from
+ordinary inbound turns and legacy AutoNudge turns.
+
 ### Approval ladder
 
 Four modes (constants, mirroring the native Slack + dashboard ladder):

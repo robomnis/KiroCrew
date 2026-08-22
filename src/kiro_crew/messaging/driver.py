@@ -45,6 +45,10 @@ from kiro_crew.messaging.renderer import (
     OutputEvent,
     Renderer,
 )
+from kiro_crew.monitoring.completion import (
+    MonitorCompletionHook,
+    disposition_for_stop_reason,
+)
 from kiro_crew.security import StreamRedactor, redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 
@@ -309,6 +313,7 @@ class TurnDriver:
         auto_approve_session: Callable[[], bool] | None = None,
         tool_gate: Callable[[Any], str] | None = None,
         directive_consumer: DirectiveConsumer | None = None,
+        monitor_completion: MonitorCompletionHook | None = None,
     ) -> None:
         self.provider = provider
         self.renderer = renderer
@@ -328,6 +333,7 @@ class TurnDriver:
         # EVENT_TOOL_RESULT for a tool call whose trusted ``_meta.kiro``
         # identity was recorded at EVENT_TOOL_CALL — the forgery gate.
         self.directive_consumer = directive_consumer
+        self.monitor_completion = monitor_completion
 
     async def run(self, message: str) -> str:
         """Drive one turn; return the accumulated channel-safe assistant text."""
@@ -566,6 +572,17 @@ class TurnDriver:
                 await self.renderer.dispatch(
                     OutputEvent(kind=DONE, stop_reason=event.stop_reason)
                 )
+                if self.monitor_completion is not None:
+                    try:
+                        await self.monitor_completion.complete(
+                            disposition_for_stop_reason(event.stop_reason),
+                            event.usage,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "monitor turn completion callback failed",
+                            exc_info=True,
+                        )
         return accumulated
 
     async def _consume_directive(

@@ -184,6 +184,10 @@ from kiro_crew.messaging.link import SLACK_NAMESPACE, telemetry_channel_of
 from kiro_crew.messaging.renderer import chunk_text
 from kiro_crew.metrics.events import TURN_TIMEOUT_CAUSE, emit_counter
 from kiro_crew.metrics.provider import get_recorder
+from kiro_crew.monitoring.completion import (
+    MonitorCompletionHook,
+    disposition_for_stop_reason,
+)
 from kiro_crew.platform import redact_via_context
 from kiro_crew.providers.acp import is_claude_backend
 from kiro_crew.providers.base import (
@@ -4325,6 +4329,7 @@ async def _run_chat(
     _synthetic_payload: bool = False,
     regenerate_hint: str = "",
     _on_consumed: "Callable[[bool], None] | None" = None,
+    monitor_completion: MonitorCompletionHook | None = None,
 ) -> None:
     """Stream LLM response into *slot*.  Survives browser disconnect."""
 
@@ -7392,6 +7397,17 @@ async def _run_chat(
                         _stop_reason,
                         slot.key,
                     )
+                if monitor_completion is not None:
+                    try:
+                        await monitor_completion.complete(
+                            disposition_for_stop_reason(event.stop_reason),
+                            event.usage,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "dashboard monitor turn completion callback failed",
+                            exc_info=True,
+                        )
                 break
 
         # Turn stream ended: flush any withheld thinking tail (a thinking-final

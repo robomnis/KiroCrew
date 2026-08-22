@@ -193,6 +193,11 @@ from kiro_crew.messaging.link import (
 )
 from kiro_crew.messaging.renderer import chunk_text
 from kiro_crew.messaging.transport import InboundMessage
+from kiro_crew.monitoring.completion import (
+    MonitorCompletionHook,
+    disposition_for_stop_reason,
+)
+from kiro_crew.monitoring.models import MonitorActionDisposition
 from kiro_crew.platform import boot_platform
 from kiro_crew.platform.context import (
     PlatformCompositionError,
@@ -255,6 +260,7 @@ from kiro_crew.subagent_completion_meta import (
 from kiro_crew.taskrunner import TaskRunner
 
 if TYPE_CHECKING:
+    from kiro_crew.acp.types import TurnUsage
     from kiro_crew.dashboard.state import _ChatSlot
     from kiro_crew.discord.client import DiscordClient
     from kiro_crew.imessage.client import IMessageClient
@@ -277,6 +283,7 @@ async def _persist_turn_row(
     surface: str,
     agent_fallback: Callable[[], str],
     t0: float,
+    usage: "TurnUsage | None" = None,
 ) -> None:
     """Persist one per-turn usage row for a background dispatch surface.
 
@@ -304,7 +311,7 @@ async def _persist_turn_row(
         await persist_token_record_async(
             session_key,
             "",
-            provider_last_turn_usage(client),
+            provider_last_turn_usage(client) if usage is None else usage,
             provider=provider,
             surface=surface,
             agent=read_effective_agent(client) or agent_fallback(),
@@ -4837,6 +4844,11 @@ class GatewayOrchestrator:
             full_msg, _ = await run_in_embed_pool(
                 self.ctx_builder.build_message, tagged, is_new, key, provider_type=_provider
             )
+            _raw_completions: list[LLMEvent] = []
+            _completion_hook = self._monitor_completion_hook(loop)
+            _completion_kwargs: dict[str, Any] = {}
+            if _completion_hook is not None:
+                _completion_kwargs["on_complete"] = _raw_completions.append
             # Clock started outside wait_for so BOTH the success path and the
             # TimeoutError branch below can report the real elapsed time. acp
             # never assigns TurnUsage.duration_ms, so the row needs this.
@@ -4853,9 +4865,11 @@ class GatewayOrchestrator:
                     approval_policy=ToolApprovalPolicy.HOOK_BASED,
                     hooks=self.ctx_builder.hooks,
                     on_tool_approval=self._interactive_approval("autonudge", nudge_key=key),
+                    **_completion_kwargs,
                 ),
                 timeout=_NUDGE_TURN_TIMEOUT,
             )
+            _turn_usage = provider_last_turn_usage(client)
 
             # ── Per-turn usage row: attribute monitor spend. ──
             await _persist_turn_row(
@@ -4865,7 +4879,15 @@ class GatewayOrchestrator:
                 surface="monitor",
                 agent_fallback=lambda: _get_agent_for_session(key),
                 t0=_turn_t0,
+                usage=_turn_usage,
             )
+            if _raw_completions:
+                await self._report_monitor_completion(
+                    loop,
+                    disposition_for_stop_reason(_raw_completions[-1].stop_reason),
+                    _turn_usage,
+                    hook=_completion_hook,
+                )
         except asyncio.TimeoutError:
             # ── Timeout spend is REAL spend (issue #874 follow-up). ──
             # A timed-out nudge turn previously fell through to the generic
@@ -4882,6 +4904,7 @@ class GatewayOrchestrator:
                 key,
                 loop.id,
             )
+            _turn_usage = provider_last_turn_usage(client)
             await _persist_turn_row(
                 client,
                 key,
@@ -4889,7 +4912,15 @@ class GatewayOrchestrator:
                 surface="monitor",
                 agent_fallback=lambda: _get_agent_for_session(key),
                 t0=_turn_t0,
+                usage=_turn_usage,
             )
+            if _raw_completions:
+                await self._report_monitor_completion(
+                    loop,
+                    disposition_for_stop_reason(_raw_completions[-1].stop_reason),
+                    _turn_usage,
+                    hook=_completion_hook,
+                )
             return False
         except Exception:
             logger.exception("AutoNudge: slack nudge turn failed for %s (loop %s)", key, loop.id)
@@ -5006,8 +5037,12 @@ class GatewayOrchestrator:
                 conversation_id=conversation_id,
                 text=tagged,
             )
+            dispatch_kwargs: dict[str, Any] = {"interpret_commands": False}
+            completion_hook = self._monitor_completion_hook(loop)
+            if completion_hook is not None:
+                dispatch_kwargs["monitor_completion"] = completion_hook
             await asyncio.wait_for(
-                dispatcher.handle_message(synthetic, interpret_commands=False),
+                dispatcher.handle_message(synthetic, **dispatch_kwargs),
                 timeout=_NUDGE_TURN_TIMEOUT,
             )
             return True
@@ -5131,11 +5166,15 @@ class GatewayOrchestrator:
         # independently and would otherwise put N turns on the runtime at once.
         # An attended slot (any user session with a monitor loop) is passed
         # straight through, so babysit loops on human sessions are unaffected.
+        run_kwargs: dict[str, Any] = {}
+        completion_hook = self._monitor_completion_hook(loop)
+        if completion_hook is not None:
+            run_kwargs["monitor_completion"] = completion_hook
         task = spawn_guarded_turn(
             self.dashboard_state,
             slot,
             self.dashboard_state.run_background_turn(
-                slot, _run_chat(self.dashboard_state, slot, tagged)
+                slot, _run_chat(self.dashboard_state, slot, tagged, **run_kwargs)
             ),
         )
         # Mirror dashboard /api/chat/send path so slot.running == True and sidebar
@@ -5144,6 +5183,46 @@ class GatewayOrchestrator:
         self._session_tasks[slot.key] = task
         self.dashboard_state.push_slots_update()
         return True
+
+    def _monitor_completion_hook(self, loop: NudgeLoop) -> MonitorCompletionHook | None:
+        """Bind a structured loop's in-flight identity to controller accounting."""
+        state = getattr(loop, "monitor", None)
+        if state is None:
+            return None
+        service = self.autonudge_svc
+        if (
+            service is None
+            or not state.wake_in_flight
+            or not state.last_wake_fingerprint
+        ):
+            return None
+        return MonitorCompletionHook(
+            loop.id,
+            state.last_wake_fingerprint,
+            service.record_monitor_turn_completion,
+        )
+
+    async def _report_monitor_completion(
+        self,
+        loop: NudgeLoop,
+        disposition: MonitorActionDisposition,
+        usage: "TurnUsage | None",
+        *,
+        hook: MonitorCompletionHook | None = None,
+    ) -> None:
+        """Best-effort monitor accounting that cannot change delivery outcome."""
+        if hook is None:
+            hook = self._monitor_completion_hook(loop)
+        if hook is None:
+            return
+        try:
+            await hook.complete(disposition, usage)
+        except Exception:
+            logger.warning(
+                "monitor turn completion callback failed for loop %s",
+                loop.id,
+                exc_info=True,
+            )
 
     async def _init_autonudge(self) -> None:
         """Initialize and start the auto-nudge service (feature-flagged)."""

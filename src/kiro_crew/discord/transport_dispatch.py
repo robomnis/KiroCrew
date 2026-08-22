@@ -64,6 +64,7 @@ from kiro_crew.messaging.link import (
 )
 from kiro_crew.messaging.renderer import Renderer, SilentRenderer
 from kiro_crew.messaging.transport import InboundMessage
+from kiro_crew.monitoring.completion import MonitorCompletionHook
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 from kiro_crew.session_map import ConversationOwnershipConflict
@@ -224,6 +225,7 @@ class DiscordDispatcher:
         *,
         drain: bool = True,
         interpret_commands: bool = True,
+        monitor_completion: MonitorCompletionHook | None = None,
     ) -> None:
         """Drive one authorized inbound message through TurnDriver end-to-end."""
         assert self.client is not None, "DiscordDispatcher.client must be set"
@@ -548,6 +550,7 @@ class DiscordDispatcher:
                 directive_consumer=build_directive_consumer(
                     session_key=session_key, sessions=self.sessions, dispatcher=self
                 ),
+                monitor_completion=monitor_completion,
             )
             accumulated = await driver.run(full_message)
 

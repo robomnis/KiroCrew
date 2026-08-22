@@ -18,6 +18,7 @@ from kiro_crew.acp.types import (
     EVENT_TEXT_CHUNK,
     EVENT_TOOL_CALL,
     AcpEvent,
+    TurnUsage,
 )
 from kiro_crew.messaging import (
     APPROVAL_AUTO,
@@ -26,6 +27,8 @@ from kiro_crew.messaging import (
     TurnDriver,
 )
 from kiro_crew.messaging.renderer import Renderer
+from kiro_crew.monitoring.completion import MonitorCompletionHook
+from kiro_crew.monitoring.models import MonitorActionCompletion, MonitorActionDisposition
 
 
 class _RecordingRenderer(Renderer):
@@ -88,6 +91,30 @@ class TestTurnDriverTranslation:
         out = _run(p, r)
         assert out == "Hello world"
         assert [e[0] for e in r.events] == ["text_chunk", "text_chunk", "done"]
+
+    def test_raw_complete_reports_monitor_action_once(self):
+        r = _RecordingRenderer()
+        p = _ScriptedProvider(
+            [
+                AcpEvent(
+                    kind=EVENT_COMPLETE,
+                    stop_reason="end_turn",
+                    usage=TurnUsage(input_tokens=20, output_tokens=5),
+                )
+            ]
+        )
+        completions: list[MonitorActionCompletion] = []
+
+        async def _capture(completion: MonitorActionCompletion) -> None:
+            completions.append(completion)
+
+        hook = MonitorCompletionHook("monitor1", "failure-a", _capture)
+        _run(p, r, monitor_completion=hook)
+
+        assert len(completions) == 1
+        assert completions[0].disposition is MonitorActionDisposition.SUCCESS
+        assert completions[0].input_tokens == 20
+        assert completions[0].output_tokens == 5
 
     def test_tool_calls_emit_uniform_tool_call(self):
         r = _RecordingRenderer()
