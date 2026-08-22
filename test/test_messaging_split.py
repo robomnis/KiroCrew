@@ -12,7 +12,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from kiro_crew.messaging.split import _Fence, _safe_cut, split_markdown_safe
+from kiro_crew.messaging.split import (
+    _Fence,
+    _safe_cut,
+    split_markdown_safe,
+    truncate_utf8,
+)
 
 # A line that opens or closes a fence. Used to strip fence scaffolding out of a
 # reassembled split: the reopen duplicates the opener and the seal adds a
@@ -1301,3 +1306,51 @@ def test_the_oracle_accounts_for_every_split_in_the_small_space(limit):
                 f"limit={limit} reserve={reserve} text={text!r}\n"
                 f"chunks={chunks!r}\nproblem: {problem}"
             )
+
+
+class TestTruncateUtf8:
+    """The byte-budget guard shared by every byte-capped channel.
+
+    ``max_message_chars`` is a CHARACTER budget, so a channel whose wire limit is
+    denominated in BYTES declares ``bytes // 4`` and keeps this as the exact
+    guard. Webex and WeCom both depend on it; the properties are pinned here so
+    neither channel re-derives them.
+    """
+
+    def test_text_under_the_budget_is_returned_unchanged(self) -> None:
+        assert truncate_utf8("hello", 7000) == "hello"
+
+    def test_text_exactly_at_the_budget_is_kept_whole(self) -> None:
+        text = "x" * 7000
+        assert truncate_utf8(text, 7000) == text
+
+    def test_the_budget_is_bytes_not_characters(self) -> None:
+        # A 4-byte emoji: 3000 characters is 12000 bytes, over a 7000-BYTE limit
+        # while comfortably under a 7000-CHARACTER one. Counting characters here
+        # is the defect the helper exists to prevent.
+        out = truncate_utf8("\U0001f43e" * 3000, 7000)
+        assert len(out.encode("utf-8")) <= 7000
+        assert len(out) < 3000
+
+    def test_a_cut_never_splits_a_code_point(self) -> None:
+        # A boundary landing mid-sequence must drop the partial bytes, not raise
+        # and not emit a replacement character.
+        out = truncate_utf8("a" + "\U0001f43e" * 2000, 7000)
+        assert "\ufffd" not in out
+        out.encode("utf-8")  # round-trips cleanly
+
+    def test_a_three_byte_cjk_run_cuts_on_a_character_boundary(self) -> None:
+        # 3 does not divide the budget, so the naive slice lands mid-character.
+        out = truncate_utf8("\u5b57" * 100, 100)
+        assert out == "\u5b57" * 33
+        assert "\ufffd" not in out
+
+    def test_a_non_positive_budget_disables_the_guard(self) -> None:
+        # Mirrors split_markdown_safe's treatment of a non-positive limit: a
+        # caller with no budget to enforce must not lose its whole message to a
+        # zero, which is what a bare slice would do.
+        assert truncate_utf8("hello", 0) == "hello"
+        assert truncate_utf8("hello", -1) == "hello"
+
+    def test_empty_text_is_returned_unchanged(self) -> None:
+        assert truncate_utf8("", 100) == ""

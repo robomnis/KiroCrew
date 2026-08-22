@@ -34,7 +34,12 @@ from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.hooks import TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_crew.messaging.driver import DirectiveConsumer, TurnDriver
 from kiro_crew.messaging.identity import channel_inbound_permitted, publish_turn_identity
-from kiro_crew.messaging.link import channel_namespace_of, is_channel_session_key
+from kiro_crew.messaging.link import (
+    ChannelLink,
+    bind_origin_mirror,
+    channel_namespace_of,
+    is_channel_session_key,
+)
 from kiro_crew.messaging.renderer import SilentRenderer
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -102,6 +107,20 @@ class ChannelTurn:
 
     audit_caller: str = ""
     """SEL audit caller label; defaults to ``<channel_type>:unknown``."""
+
+    origin_location: Optional[ChannelLink] = None
+    """This conversation, as a :class:`~kiro_crew.messaging.link.ChannelLink`.
+
+    Supplied ONLY by a channel whose own ``capabilities.supports_proactive_send``
+    is True, which is what makes the decision capability-driven rather than a
+    per-channel hardcode: binding a mirror on a channel that cannot send
+    unprompted would promise a delivery the transport must then refuse.
+
+    When set, :func:`drive_turn` binds it as the session's own outbound mirror on
+    every turn, so a cron result, a subagent reply or a dashboard turn on this
+    conversation reaches the person actually reading it. Telegram and Discord
+    carry their own copy of this call because they run their own turn loops.
+    """
 
 
 async def inbound_permitted(channel_type: str) -> bool:
@@ -309,6 +328,25 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
         # Publish this turn's session identity so managed MCP tools resolve
         # X-Session-Key; one shared writer lives in messaging.identity.
         await publish_turn_identity(sessions, session_key)
+        # Re-assert the conversation as its own outbound mirror. On EVERY turn,
+        # not just a new session: a restart-cold session or an unlink elsewhere
+        # can take the binding away, and only a self-healing bind cannot leave a
+        # live conversation silently unmirrored. bind_origin_mirror never
+        # repoints an existing binding and honours the persisted opt-out.
+        #
+        # Guarded because this is BOOKKEEPING and the turn is the product: a
+        # session store that cannot answer must cost the mirror, not the answer
+        # the user is waiting for. Same reasoning as the post-turn steps below.
+        if turn.origin_location is not None:
+            try:
+                bind_origin_mirror(sessions, key=session_key, location=turn.origin_location)
+            except Exception:
+                logger.warning(
+                    "%s: origin-mirror bind failed session=%s",
+                    turn.channel_type,
+                    session_key,
+                    exc_info=True,
+                )
         # Off-loop: build_message embeds the episodic query (blocking urllib).
         full_message, _ = await run_in_embed_pool(
             ctx_builder.build_message,

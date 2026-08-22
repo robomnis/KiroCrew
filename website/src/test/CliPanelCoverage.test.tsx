@@ -102,7 +102,11 @@ vi.mock('../components/TerminalKeyBar', () => ({ default: () => <div data-testid
 const touch = vi.hoisted(() => ({ value: false }))
 vi.mock('../hooks/useIsTouchDevice', () => ({ useIsTouchDevice: () => touch.value }))
 
-import CliPanel, { disposeTerminalSession, useDeleteTerminalSession } from '../components/CliPanel'
+import CliPanel, {
+  disposeTerminalSession,
+  useDeleteTerminalSession,
+  __resetThemeObserver,
+} from '../components/CliPanel'
 import { setTerminalFontSize, __resetTerminalFontStore } from '../hooks/useTerminalFont'
 
 /* ── harness ──────────────────────────────────────────────────────────────── */
@@ -190,6 +194,10 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  // The theme observer is a module singleton wired on the first mount; left in
+  // place it stops delivering <head> records to later tests, which made two theme
+  // tests pass or fail on their position in the file rather than on behaviour.
+  __resetThemeObserver()
   for (const id of live) disposeTerminalSession(id)
   live.clear()
   restoreLayout()

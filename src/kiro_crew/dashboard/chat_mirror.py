@@ -111,9 +111,7 @@ def _resumes_inbound(transport: Any) -> bool:
     ``getattr`` chain is the conservative branch: a transport with no capability
     object at all degrades to outbound-only.
     """
-    return bool(
-        getattr(getattr(transport, "capabilities", None), "supports_session_resume", False)
-    )
+    return bool(getattr(getattr(transport, "capabilities", None), "supports_session_resume", False))
 
 
 async def api_chat_slot_mirror_link(request: web.Request) -> web.Response:
@@ -177,7 +175,13 @@ async def api_chat_slot_mirror_link(request: web.Request) -> web.Response:
         if target is None:
             existing = state.sessions.get_mirror_link(session_key)
             if existing is None:
-                return web.json_response({"error": "channel_type required"}, status=400)
+                # Same condition, and so the same code, as the explicit-body
+                # check below: nothing names a channel. Two sites emitting one
+                # sentence must not carry two different machine contracts.
+                return web.json_response(
+                    {"error": "channel_type required", "code": "channel_type_required"},
+                    status=400,
+                )
             return web.json_response({"error": "mirror channel is not live"}, status=503)
         link, transport = target
         try:
@@ -201,9 +205,13 @@ async def api_chat_slot_mirror_link(request: web.Request) -> web.Response:
         )
 
     if not channel_type:
-        return web.json_response({"error": "channel_type required"}, status=400)
+        return web.json_response(
+            {"error": "channel_type required", "code": "channel_type_required"}, status=400
+        )
     if channel_type == SLACK_NAMESPACE:
-        return web.json_response({"error": "use /slack-link for Slack"}, status=400)
+        return web.json_response(
+            {"error": "use /slack-link for Slack", "code": "use_slack_link"}, status=400
+        )
     if not target_id:
         return web.json_response(
             {"error": "target_id required", "code": "target_id_required"}, status=400
@@ -215,8 +223,14 @@ async def api_chat_slot_mirror_link(request: web.Request) -> web.Response:
             status=503,
         )
     if not transport.capabilities.supports_proactive_send:
+        # The channel type stays in the advisory prose only. ``code`` is the
+        # stable contract, so it names the CONDITION and never interpolates a
+        # request value a client would have to parse back out.
         return web.json_response(
-            {"error": f"channel '{channel_type}' cannot mirror (no proactive send)"},
+            {
+                "error": f"channel '{channel_type}' cannot mirror (no proactive send)",
+                "code": "channel_not_proactive",
+            },
             status=400,
         )
     session_key = effective_session_key(slot)
@@ -388,7 +402,7 @@ async def api_chat_slot_mirror_link(request: web.Request) -> web.Response:
         every unit fits, but the reservation pushed the oldest turn out and then
         spent the reserved slot announcing the omission it had just caused.
         """
-        tail = recent_turn_units[total_turns - keep:] if keep else []
+        tail = recent_turn_units[total_turns - keep :] if keep else []
         dropped = total_turns - keep
         marker = 1 if (selection.skipped_turns or dropped) else 0
         head = len(head_units) if with_head else 0
@@ -412,7 +426,7 @@ async def api_chat_slot_mirror_link(request: web.Request) -> web.Response:
     if not keep_turns and total_turns:
         keep_turns, include_head = 1, False
 
-    kept = recent_turn_units[total_turns - keep_turns:] if keep_turns else []
+    kept = recent_turn_units[total_turns - keep_turns :] if keep_turns else []
     skipped_total = (
         selection.skipped_turns
         + (total_turns - keep_turns)
@@ -642,9 +656,7 @@ async def api_chat_slot_mirror_unlink(request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)
 
     session_key = effective_session_key(slot)
-    cleared = state.sessions.clear_mirror_link(
-        session_key, reason=UNBIND_REASON_DASHBOARD_UNLINK
-    )
+    cleared = state.sessions.clear_mirror_link(session_key, reason=UNBIND_REASON_DASHBOARD_UNLINK)
     state.push_slots_update()
     sel().log_api_access(
         caller="dashboard",

@@ -1,0 +1,14 @@
+{
+  "_provenance": {
+    "source": "assumed",
+    "reference": "Inferred from kiro_crew.wecom.client._handle_message, which keys on 'errcode' present with NO 'cmd' and then reads headers.req_id to tell a pong ACK from a stream-reply ACK. No live WeCom AI Bot capture exists: this fork has no WeCom bot credentials, so nothing here was observed on the wire.",
+    "captured_at": "",
+    "note": "UNVERIFIED against the vendor. req_id deliberately equals the msg_callback_text fixture's, because a stream frame replays the inbound req_id and the ACK echoes it back -- that identity is what makes the frame routable. A success ACK may also carry errmsg; only the two fields the client requires are claimed here."
+  },
+  "payload": {
+    "headers": {
+      "req_id": "9f3c1d2ba7e4485c"
+    },
+    "errcode": 0
+  }
+}

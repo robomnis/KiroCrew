@@ -3729,6 +3729,8 @@
       "defaultValue": {
         "enabled": false,
         "allowed_users": [],
+        "allow_group_chats": false,
+        "allowed_chat_ids": [],
         "allow_all_users": false,
         "ws_url": "wss://openws.work.weixin.qq.com",
         "soft_threshold_pct": 80,
@@ -3779,6 +3781,52 @@
       "label": "*",
       "help": "",
       "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": null
+    },
+    {
+      "path": "wecom.allow_group_chats",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wecom"
+      ],
+      "label": "Allow Group Chats",
+      "help": "Answer in WeCom GROUP conversations, not just direct messages. Off by default and deliberately separate from the user allow-list: a group is a broader disclosure boundary than a DM, because every member can read the agent's tool output and file contents even though only allow-listed senders can drive a turn. Each group gets its own session, never the sender's private one.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "wecom.allowed_chat_ids",
+      "kind": "core",
+      "type": "array",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [
+        "wecom"
+      ],
+      "label": "Allowed Group Chat IDs",
+      "help": "When set, restrict group answers to these WeCom chatids. Empty means every group the bot is added to, once allow_group_chats is on — so naming the groups is the tighter posture.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": []
+    },
+    {
+      "path": "wecom.allowed_chat_ids.*",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "*",
+      "help": "",
+      "hasChildren": false,
       "enumValues": null,
       "defaultValue": null
     },

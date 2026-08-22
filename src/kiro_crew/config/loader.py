@@ -4996,6 +4996,29 @@ class WeComConfig:
             tags=["wecom"],
         ),
     )
+    allow_group_chats: bool = field(
+        default=False,
+        metadata=_meta(
+            "Allow Group Chats",
+            "Answer in WeCom GROUP conversations, not just direct messages. Off "
+            "by default and deliberately separate from the user allow-list: a "
+            "group is a broader disclosure boundary than a DM, because every "
+            "member can read the agent's tool output and file contents even "
+            "though only allow-listed senders can drive a turn. Each group gets "
+            "its own session, never the sender's private one.",
+            tags=["wecom"],
+        ),
+    )
+    allowed_chat_ids: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Allowed Group Chat IDs",
+            "When set, restrict group answers to these WeCom chatids. Empty "
+            "means every group the bot is added to, once allow_group_chats is "
+            "on — so naming the groups is the tighter posture.",
+            tags=["wecom"],
+        ),
+    )
     allow_all_users: bool = field(
         default=False,
         metadata=_meta(
@@ -6815,13 +6838,31 @@ class KiroCrewConfig:
             ),
             wecom=WeComConfig(
                 session_folder=_coerce_session_folder(wecom_data.get("session_folder")),
-                enabled=bool(wecom_data.get("enabled", False)),
+                # _safe_bool, not bool(): `bool("false")` is True, so a JSON string
+                # in any of these would turn the operator's "off" into "on". For
+                # allow_group_chats that is a disclosure boundary -- every member of a
+                # group would start receiving the agent's tool output without anyone
+                # opting in -- so the parse must treat a non-bool as the default.
+                enabled=_safe_bool(wecom_data.get("enabled"), False),
                 allowed_users=[
                     u
-                    for u in wecom_data.get("allowed_users", [])
+                    for u in _safe_list(wecom_data.get("allowed_users"))
                     if isinstance(u, dict) and u.get("userid")
                 ],
-                allow_all_users=bool(wecom_data.get("allow_all_users", False)),
+                allow_all_users=_safe_bool(wecom_data.get("allow_all_users"), False),
+                allow_group_chats=_safe_bool(wecom_data.get("allow_group_chats"), False),
+                # Stored STRIPPED, not merely validated stripped: the value is
+                # matched by exact frozenset membership against the wire chatid
+                # (``WeComTransport._group_permitted``), so an entry with incidental
+                # surrounding whitespace would validate, store as " chatABC ", never
+                # match "chatABC", and silently deny a group the operator explicitly
+                # allow-listed — auditing it as ``denied_group_chat`` with no hint that
+                # the config was the cause.
+                allowed_chat_ids=[
+                    c.strip()
+                    for c in _safe_list(wecom_data.get("allowed_chat_ids"))
+                    if isinstance(c, str) and c.strip()
+                ],
                 ws_url=str(wecom_data.get("ws_url", "wss://openws.work.weixin.qq.com")),
                 soft_threshold_pct=_threshold_pct(wecom_data.get("soft_threshold_pct"), 80),
                 hard_threshold_pct=_threshold_pct(wecom_data.get("hard_threshold_pct"), 95),

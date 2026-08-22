@@ -1,0 +1,11 @@
+{
+  "_provenance": {
+    "source": "assumed",
+    "reference": "Inferred from kiro_crew.wecom.client.send_reply, which treats an errcode outside (0, None) as a failure and logs errmsg alongside it. No live WeCom AI Bot capture exists: this fork has no WeCom bot credentials, so nothing here was observed on the wire.",
+    "captured_at": "",
+    "note": "UNVERIFIED against the vendor. Guards our own parsing (a 200 carrying a non-zero errcode must not be reported as delivered) but does not establish that WeCom answers a response_url POST with exactly this key. The REQUEST body is our own construction, not a vendor claim, so test_wecom_wire.py asserts it directly instead of recording it here. Replace with a live_probe capture next time credentials are in hand."
+  },
+  "payload": {
+    "errcode": 0
+  }
+}

@@ -354,7 +354,7 @@ def legacy_key(key: str) -> str | None:
     """Return the bare ``thread_ts`` for a ``slack:<thread>`` key, else None."""
     prefix = f"{SLACK_NAMESPACE}:"
     if key.startswith(prefix):
-        rest = key[len(prefix):]
+        rest = key[len(prefix) :]
         if is_legacy_slack_key(rest):
             return rest
     return None
@@ -370,9 +370,14 @@ DM_SCOPE_UNIFIED = "unified"
 DEFAULT_DM_SCOPE = DM_SCOPE_PER_CHANNEL_PEER
 
 #: ``direct`` (1:1 DM) is the baseline; ``forum`` keys a Telegram supergroup
-#: forum Topic ``(chat_id, thread_id)`` to its own session (Slack-thread style).
+#: forum Topic ``(chat_id, thread_id)`` to its own session (Slack-thread style);
+#: ``group`` keys a whole multi-party conversation to one session, for a platform
+#: whose group is a CONVERSATION rather than a thread (WeCom). The distinction is
+#: not cosmetic: the forum-shaped paths promise per-topic isolation, so reusing
+#: ``forum`` for a flat group would advertise a boundary that does not exist.
 CHAT_TYPE_DIRECT = "direct"
 CHAT_TYPE_FORUM = "forum"
+CHAT_TYPE_GROUP = "group"
 
 
 def build_dm_session_key(

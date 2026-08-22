@@ -87,12 +87,64 @@ _TERMINAL_BOUND_REASONS = frozenset({"cycle_cap", "runtime_budget", APPROVAL_STA
 # dashboard turn-lifecycle hooks (notify_turn_complete / notify_user_input),
 # so they run on a fixed interval instead of an idle timer: the timer re-arms
 # itself right after every delivered fire.
-_CHANNEL_KEY_PREFIXES = ("slack:", "discord:", "telegram:", "whatsapp:", "unified:")
+#
+# This is ``messaging.link.CHANNEL_SESSION_NAMESPACES`` minus ``wecom``, spelled
+# out here rather than derived from it, for two independent reasons:
+#
+# 1. IMPORT WEIGHT. ``autonudge`` is imported at module scope by ``mcp_core``
+#    (i.e. by every MCP server process) and by the dashboard chat layer, and it
+#    depends only on config/security/platform_compat today. Naming
+#    ``kiro_crew.messaging.link`` runs ``messaging/__init__``, which pulls the
+#    driver/renderer/transport layer and, transitively, the ACP client, agent,
+#    hooks, artifacts, metrics and sqlite — measured at 48 additional
+#    ``kiro_crew`` modules to obtain one nine-element tuple of string literals.
+# 2. THIS IS A KEY-SHAPE QUESTION, NOT A LIVE-CAPABILITY ONE. ``is_channel_key``
+#    selects the RE-ARM STRATEGY and the expiry-notification metadata, so it has
+#    to answer identically whether or not the transport happens to be registered
+#    at this instant. Deriving it from a runtime ``supports_proactive_send``
+#    lookup fails toward the WRONG branch: a loop whose transport is momentarily
+#    absent would read as a dashboard slot, so ``_run_fire_cycle`` would stop
+#    self-re-arming it — and nothing else ever will, since
+#    ``notify_turn_complete`` never fires for a channel key — while the expiry
+#    notice would synthesize a ``dashboard:<namespace>:<id>`` jump link pointing
+#    at no slot.
+#
+# Membership therefore does NOT assert deliverability; it asserts "this key names
+# a conversation rather than a chat slot". Whether a nudge can actually be
+# delivered stays with the fail-closed ladder in ``dashboard/chat_runner.py``
+# (``_resolve_channel_target``: governance, then a REGISTERED transport, then
+# ``supports_proactive_send``), which logs its reason and degrades to a no-op.
+# ``whatsapp`` has no transport package in this fork at all and is listed for
+# exactly that reason: an unroutable key must still classify as a channel key so
+# that the ladder, and not a misclassification, is what refuses it.
+#
+# ``wecom`` is DELIBERATELY ABSENT — a decision, not an omission. Its transport
+# declares ``supports_proactive_send=False`` because a WeCom reply is bound to the
+# inbound request's own reply token, so no unattended send exists for a nudge
+# cycle to use; admitting it would only buy loops that wake, spend a turn and have
+# nowhere to put the answer. Add it here on the day WeCom gains a proactive send
+# path, in the same change that flips that capability.
+_CHANNEL_KEY_PREFIXES = (
+    "slack:",
+    "discord:",
+    "telegram:",
+    "whatsapp:",
+    "webex:",
+    "teams:",
+    "weixin:",
+    "imessage:",
+    "unified:",
+)
 
 
 def is_channel_key(key: str) -> bool:
     """True when *key* names a messaging-channel session (``slack:<ts>``,
-    ``discord:{agent}:direct:{user}`` ...) rather than a dashboard chat slot."""
+    ``discord:{agent}:direct:{user}`` ...) rather than a dashboard chat slot.
+
+    A CLASSIFICATION, not a permission: see :data:`_CHANNEL_KEY_PREFIXES` for why
+    the set is spelled out and why ``wecom`` is excluded from it. Callers asking
+    "may this session be armed?" want :func:`binding_key_for` instead.
+    """
     return key.startswith(_CHANNEL_KEY_PREFIXES)
 
 
@@ -107,6 +159,18 @@ def binding_key_for(session_key: str) -> str | None:
 
     Single source of truth shared by the ``monitor_start`` MCP tool and the
     workflow ``ctx.nudge`` port so both agree on what "nudge-able" means.
+
+    NARROWER THAN :data:`_CHANNEL_KEY_PREFIXES` ON PURPOSE, and for a different
+    reason than that tuple's own exclusions. ``is_channel_key`` classifies a key's
+    SHAPE; this function answers whether an arm request can be honoured, which
+    additionally requires an ownership check in ``autonudge_authz`` and a fire
+    route in the gateway's ``_fire`` dispatcher — both implemented for ``slack:``
+    and ``discord:`` only. Passing a namespace through ahead of those two would
+    arm a loop that is denied at the chokepoint (or removed on its first fire
+    with "unsupported channel key"), which is strictly worse than refusing it
+    here: a clean "not supported from this session type" instead of a loop that
+    appears to exist and then dies. Widen this set only together with the
+    matching ownership check and fire route.
     """
     if not session_key:
         return None
@@ -657,9 +721,7 @@ class AutoNudgeService:
             # worker thread, and await it so a persistence failure still
             # propagates to the caller before the loop is reported armed.
             payload = self._serialize_state()
-            await asyncio.get_running_loop().run_in_executor(
-                None, self._write_state, payload
-            )
+            await asyncio.get_running_loop().run_in_executor(None, self._write_state, payload)
             self._arm_from_deadline(loop)
         self._emit("added", loop)
         logger.info("AutoNudge: added loop %s on slot %s (idle=%ds)", loop.id, slot_key, idle_secs)
@@ -777,11 +839,7 @@ class AutoNudgeService:
                         "reasonless inactive update",
                         loop.id,
                     )
-                elif (
-                    stopped_reason in _TERMINAL_BOUND_REASONS
-                    and not active
-                    and not loop.active
-                ):
+                elif stopped_reason in _TERMINAL_BOUND_REASONS and not active and not loop.active:
                     logger.info(
                         "AutoNudge: loop %s already deactivated (%s) — %s bound "
                         "not overwriting it",

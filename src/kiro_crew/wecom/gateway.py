@@ -88,6 +88,8 @@ async def maybe_start_wecom(orch: "GatewayOrchestrator") -> "WeComClient | None"
             allowed_users=_allowed_userids(orch),
             allow_all=bool(orch._cfg.wecom.allow_all_users),
             owner_id=orch._owner_id,
+            allow_group_chats=bool(orch._cfg.wecom.allow_group_chats),
+            allowed_chat_ids=list(orch._cfg.wecom.allowed_chat_ids),
             dispatch=dispatcher.handle_message,
         )
         # Inbound: client WS frame -> transport.receive (authorize + normalize)
@@ -124,8 +126,6 @@ async def maybe_start_wecom(orch: "GatewayOrchestrator") -> "WeComClient | None"
     except Exception as exc:
         if orch.dashboard_state is not None:
             orch.dashboard_state.wecom_connected = False
-            orch.dashboard_state.wecom_connect_error = (
-                f"{type(exc).__name__}: {exc}"[:120]
-            )
+            orch.dashboard_state.wecom_connect_error = f"{type(exc).__name__}: {exc}"[:120]
         logger.exception("Failed to start WeCom channel; continuing without it.")
         return None

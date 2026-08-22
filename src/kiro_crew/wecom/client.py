@@ -24,10 +24,16 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
+from kiro_crew.messaging.split import truncate_utf8
+
 logger = logging.getLogger(__name__)
 
-# WeCom markdown reply content cap (bytes-ish; keep well under platform limits).
-_REPLY_MAX_CHARS = 20000
+# WeCom denominates a markdown reply's cap in UTF-8 BYTES, and this is the
+# conservative budget kept well under the platform limit. The unit is the whole
+# point: one CJK character is three bytes, so a reply measured in CHARACTERS can
+# sit under the budget and be ~3x over it on the wire, where WeCom rejects the
+# frame and the user gets nothing but a non-zero errcode in the log.
+WECOM_MAX_REPLY_BYTES = 20000
 
 # A WS connection must live at least this long to count as "healthy" and reset the
 # reconnect backoff. A connect->immediate-close (bad creds, or a WeCom anti-kick
@@ -146,6 +152,14 @@ class WeComClient:
         ws = self._ws
         if ws is None or ws.closed or not req_id:
             return False
+        bounded = truncate_utf8(content or "…", WECOM_MAX_REPLY_BYTES)
+        if len(bounded) != len(content or "…"):
+            # The renderer splits against a byte-safe budget, so reaching this
+            # means a part still did not fit -- the shared splitter documents one
+            # chunk that can exceed its limit by the fence scaffolding it adds.
+            # Losing a tail is survivable; losing it with no record is the defect
+            # the split exists to prevent.
+            logger.warning("WeCom: reply frame exceeded the byte cap; tail truncated")
         frame = {
             "cmd": "aibot_respond_msg",
             "headers": {"req_id": req_id},
@@ -154,7 +168,7 @@ class WeComClient:
                 "stream": {
                     "id": stream_id,
                     "finish": finish,
-                    "content": (content or "…")[:_REPLY_MAX_CHARS],
+                    "content": bounded,
                 },
             },
         }
@@ -164,6 +178,16 @@ class WeComClient:
         except (ConnectionError, RuntimeError, aiohttp.ClientError) as exc:
             logger.warning("WeCom stream send failed: %s", exc)
             return False
+
+    async def send_bubble(self, req_id: str, content: str) -> bool:
+        """Send *content* as its own finished bubble on an inbound ``req_id``.
+
+        The out-of-band send: a fresh ``stream_id`` opens a NEW bubble, where
+        reusing one would replace the previous bubble's content instead of adding
+        to it. Used for anything that is not the answer being streamed — a
+        threshold notice, or a part of an answer too long for one bubble.
+        """
+        return await self.send_stream(req_id, new_stream_id(), content, finish=True)
 
     async def send_reply(self, response_url: str, content: str) -> None:
         """Post a one-shot reply to an inbound message's response_url.
@@ -175,7 +199,7 @@ class WeComClient:
         if not response_url:
             logger.warning("WeCom: no response_url on inbound, cannot reply")
             return
-        text = (content or "…")[:_REPLY_MAX_CHARS]
+        text = truncate_utf8(content or "…", WECOM_MAX_REPLY_BYTES)
         payload = {"msgtype": "markdown", "markdown": {"content": text}}
         # Reuse the live WS ClientSession when available; only open (and close)
         # a throwaway session when called with no live connection (e.g. a
@@ -386,12 +410,19 @@ class WeComClient:
             logger.warning("WeCom WS: malformed callback object fields")
             return
 
-        req_id = headers.get("req_id", "")
-        userid = from_obj.get("userid", "")
-        text_content = text_obj.get("content", "")
-        response_url = body.get("response_url", "")
-        chatid = body.get("chatid", "")
-        msgtype = body.get("msgtype", "text")
+        # Every field below is externally-derived, and JSON can put a list or an
+        # object in any of them. Coerce ALL of them here, where the sibling object
+        # fields are already type-checked, rather than one at a time as each
+        # downstream use is discovered: `userid` and `chatid` both reach frozenset
+        # membership in the transport's authorize/group gates, where a dict raises
+        # "unhashable type" and the message is dropped -- a malformed frame must
+        # degrade to a deny, never to an exception out of the receive path.
+        req_id = _as_str(headers.get("req_id"))
+        userid = _as_str(from_obj.get("userid"))
+        text_content = _as_str(text_obj.get("content"))
+        response_url = _as_str(body.get("response_url"))
+        chatid = _as_str(body.get("chatid"))
+        msgtype = _as_str(body.get("msgtype", "text"))
 
         inbound = WeComInbound(
             userid=userid,
@@ -439,6 +470,17 @@ def _build_subscribe_frame(bot_id: str, secret: str) -> dict:
 
 def _req_id() -> str:
     return uuid.uuid4().hex[:16]
+
+
+def _as_str(value: object) -> str:
+    """A wire field as a string, or ``""`` when it is anything else.
+
+    The parse boundary's only type coercion. A non-string here is not recoverable
+    into something meaningful, and guessing (``str(value)``) would carry an
+    attacker-chosen repr into an audit row or a session key — so it degrades to
+    empty, which every consumer already treats as "absent / deny".
+    """
+    return value if isinstance(value, str) else ""
 
 
 def new_stream_id() -> str:

@@ -1,0 +1,25 @@
+{
+  "_provenance": {
+    "source": "assumed",
+    "reference": "Inferred from kiro_crew.wecom.client._dispatch_callback, which reads cmd, headers.req_id, body.from.userid, body.text.content, body.response_url, body.chatid and body.msgtype. No live WeCom AI Bot capture exists: this fork has no WeCom bot credentials, so nothing here was observed on the wire.",
+    "captured_at": "",
+    "note": "UNVERIFIED against the vendor. Only the fields the parser reads are claimed: a real callback very likely carries MORE (a message id, a timestamp, a chat type), so the first live probe is EXPECTED to report extra fields -- that is the shape being learned, not a regression. Values are synthetic and the response_url's code= is a placeholder, not a credential (a real response_code is single-use with a 1h TTL). Rewrite with source=live_probe the first time an authorized bot connection is in hand. LOAD-BEARING ASSUMPTION: the PRESENCE and MEANING of body.chatid is itself assumed. wecom/transport.py::receive and wecom/transport_dispatch.py::_route both treat a non-empty chatid as 'this is a group conversation' -- it selects the session bucket and it default-DENIES the turn. Note this fixture's own chatid is non-empty on a frame meant as ordinary 1:1 traffic, so if the vendor sends chatid on a 1:1 callback too, that routing is wrong and every DM would be refused as an un-opted-in group. The first live probe must record whether a 1:1 callback carries chatid. There is deliberately NO live WeCom probe lane to assert it in: every probeable WeCom frame requires SUBSCRIBING with the bot's credentials, WeCom allows one subscription per bot, so a probe would replace a running gateway's subscription and stop its reconnect loop -- a test side effect on a production channel, which no env gate makes acceptable. See the note at the foot of test_channel_wire_conformance.py. Deliberately NOT guessed around with a chatid != userid test: that swaps one unattested vendor guess for another, and fail-closed is the right direction while the semantic is unknown."
+  },
+  "payload": {
+    "cmd": "aibot_msg_callback",
+    "headers": {
+      "req_id": "9f3c1d2ba7e4485c"
+    },
+    "body": {
+      "msgtype": "text",
+      "chatid": "wrOgQhDgAAMYQiS3ot7YNbXakPLACEHOLDER",
+      "from": {
+        "userid": "zhangsan"
+      },
+      "text": {
+        "content": "帮我看一下昨天的构建为什么失败"
+      },
+      "response_url": "https://qyapi.weixin.qq.com/cgi-bin/aibot/reply?code=RESPONSE-CODE-PLACEHOLDER-NOT-A-CREDENTIAL"
+    }
+  }
+}

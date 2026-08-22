@@ -54,9 +54,16 @@ path is what made this ladder bypassable at budgets a fence's scaffolding
 consumes whole, and an exhaustive small-space oracle in the tests pins the
 property rather than the instances.
 
-Deliberately out of scope (callers needing these wrap this function): pipe
-table conversion, rendered-length budgeting for channels that inflate the
-source, and byte or UTF-16 length limits.
+Deliberately out of scope for ``split_markdown_safe`` (callers needing these
+wrap it): pipe table conversion, rendered-length budgeting for channels that
+inflate the source, and UTF-16 length limits.
+
+Byte limits get two answers here — :func:`truncate_utf8` as the wire guard and
+:func:`chunk_utf8` as the lossless fallback splitter. The guard exists because a multibyte reply can sit under a character cap and still
+be over the platform's byte cap, and the send is then refused whole. How a
+byte-capped channel *splits* is still the channel's own business — Webex chunks
+on its real byte budget, WeCom splits on a worst-case character budget — and both
+keep this as the last check before the wire.
 """
 
 from __future__ import annotations
@@ -65,7 +72,13 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-__all__ = ["split_markdown_safe", "iter_fence_spans", "open_fence_at_end"]
+__all__ = [
+    "split_markdown_safe",
+    "iter_fence_spans",
+    "open_fence_at_end",
+    "truncate_utf8",
+    "chunk_utf8",
+]
 
 # An opener is <=3 spaces of indent + a run of >=3 backticks/tildes + an info
 # string. A backtick fence's info string may not contain a backtick (otherwise
@@ -115,6 +128,56 @@ class _Fence:
 #: tail, so neither a line hard-cut across chunks nor a last line still arriving
 #: can flip the state halfway through itself.
 _Frag = tuple[str, str, bool]
+
+
+def truncate_utf8(text: str, max_bytes: int) -> str:
+    """Truncate *text* to at most *max_bytes* UTF-8 bytes, whole code points only.
+
+    The wire guard for a channel whose limit is denominated in BYTES: a reply can
+    sit under a character cap and still be over the byte cap, and a platform that
+    refuses the oversize send gives the user nothing. ``errors="ignore"`` is what
+    drops a trailing partial sequence rather than raising, so the cut lands on the
+    largest whole-code-point prefix that fits.
+
+    It LOSES the tail, so it is a backstop and not a delivery strategy — a caller
+    with more text than one message may hold splits first. A non-positive
+    *max_bytes* disables it, matching ``split_markdown_safe``'s treatment of a
+    non-positive ``limit``: a caller with no budget to enforce must not lose its
+    whole message to a zero.
+    """
+    if max_bytes <= 0:
+        return text
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def chunk_utf8(text: str, max_bytes: int) -> list[str]:
+    """Split *text* into chunks of at most *max_bytes* UTF-8 bytes each, losslessly.
+
+    The byte-budget counterpart to :func:`truncate_utf8`: same "largest whole
+    code-point prefix that fits" rule, applied repeatedly instead of once, so the
+    concatenation of the result always equals the input. Blind to markdown — a
+    fenced block spanning a cut is split mid-fence — which is exactly why it is the
+    FALLBACK and :func:`split_markdown_safe` is the default. It is what a caller
+    reaches for when fence-safety has become more expensive than it is worth.
+
+    Progress is forced, not assumed. A budget too small to hold the next code point
+    at all makes the fitting prefix empty, and a loop trusting the prefix to
+    advance would append ``""`` forever; emitting that one character over budget is
+    the lesser evil, since the caller's send may reject it where the spin takes the
+    process down.
+    """
+    if not text:
+        return []
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        piece = truncate_utf8(remaining, max_bytes) or remaining[0]
+        chunks.append(piece)
+        remaining = remaining[len(piece) :]
+    return chunks
 
 
 def split_markdown_safe(text: str, limit: int, *, reserve: int = 0) -> list[str]:

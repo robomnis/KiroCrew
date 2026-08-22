@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "source": "assumed",
+    "reference": "Inferred from the same cmd-less branch of kiro_crew.wecom.client._handle_message, plus the two errcode values named in its comment (846605 invalid req_id, 846608 stream expired) -- values that are themselves unsourced. No live WeCom AI Bot capture exists: this fork has no WeCom bot credentials, so nothing here was observed on the wire.",
+    "captured_at": "",
+    "note": "UNVERIFIED against the vendor; the errmsg text is synthetic. What is load-bearing is the SHAPE: a failed stream reply arrives as a cmd-less frame with a non-zero errcode, so the client must neither mistake it for a callback nor log either field (both are externally-derived frame content)."
+  },
+  "payload": {
+    "headers": {
+      "req_id": "9f3c1d2ba7e4485c"
+    },
+    "errcode": 846605,
+    "errmsg": "invalid req_id"
+  }
+}

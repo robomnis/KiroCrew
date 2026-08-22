@@ -41,10 +41,11 @@ ENFORCED = {
     # TOTAL interactive choices per [OPTIONS:] prompt. Widget-capable
     # renderers (slack/discord/telegram) route the parsed list through
     # messaging.renderer.apply_options_cap / cap_choices; overflow degrades
-    # to a numbered text list instead of being silently dropped. Pinned per
-    # channel by test_options_cap_contract.py. Channels declaring 0 render
-    # no widget (trailer stripped; their text fallback is the
-    # approval-ladder work).
+    # to a numbered text list instead of being silently dropped. Channels
+    # declaring 0 render no widget and route the WHOLE list through
+    # messaging.renderer.render_options_as_text, which is the same helper with
+    # zero widget slots, so every choice arrives as a numbered line. Both halves
+    # are pinned per channel by test_options_cap_contract.py.
     "max_buttons",
     # Gates whether a renderer extracts local image references out of a sealed
     # segment and uploads them (discord/renderer.py::_uploads_enabled ->
@@ -119,6 +120,16 @@ class TestCorrectedDeclarations:
         from kiro_crew.webex.transport import WEBEX_CAPABILITIES
 
         assert WEBEX_CAPABILITIES.max_message_chars * 4 <= WEBEX_MAX_TEXT
+
+    def test_wecom_char_declaration_is_safe_under_its_byte_cap(self) -> None:
+        # Same defect, same shape: WeCom caps a markdown reply in UTF-8 BYTES
+        # (WECOM_MAX_REPLY_BYTES) while this field is a CHAR count, so declaring
+        # the byte number let a CJK answer pass the shared splitter and then be
+        # refused on the wire with only an errcode in the log.
+        from kiro_crew.wecom.client import WECOM_MAX_REPLY_BYTES
+        from kiro_crew.wecom.transport import WECOM_CAPABILITIES
+
+        assert WECOM_CAPABILITIES.max_message_chars * 4 <= WECOM_MAX_REPLY_BYTES
 
     def test_the_file_directions_are_declared_separately(self) -> None:
         # One boolean was undecidable: the two directions land per channel and in

@@ -4,7 +4,7 @@
 
 `kiro_crew.messaging` is the channel-neutral transport abstraction used by the shipped Slack, Discord, Telegram, Webex, WeCom, Microsoft Teams, Weixin, and iMessage integrations; its conservative contract also leaves room for future channels such as WhatsApp. It avoids re-implementing streaming, tool approval, session identity, or rendering for each integration. It holds the channel-neutral core of the Slack turn loop (`slack/handler.py::handle_message`) so a new channel implements only two small interfaces (a `MessagingTransport` + a `Renderer`) and inherits everything else.
 
-**Dependency direction is one-way:** `slack` / `dashboard` → `messaging`, never the reverse. The `kiro_crew.messaging` package imports nothing from `kiro_crew.slack` or `kiro_crew.dashboard`; its only first-party dependencies are the shared lower-level helpers — `acp.types` event constants, the `security` redactors (`redact_credentials` / `redact_exfiltration_urls`), and `sel` for audit.
+**Dependency direction is one-way:** `slack` / `dashboard` → `messaging`, never the reverse. The `kiro_crew.messaging` package imports nothing from `kiro_crew.slack` or `kiro_crew.dashboard`. Its Layer-1/2b core depends only on shared lower-level helpers — `acp.types` event constants, the `security` redactors (`redact_credentials` / `redact_exfiltration_urls`), `sel` for audit, and the stdlib-only leaf `constants` (the ReDoS-hardened `[OPTIONS:]` trailer grammar `OPTIONS_RE_TRAILER`, so it is not re-derived per channel). Peripheral modules in the package legitimately reach further — `attachments.py` uses `transcribe` and `doc_parser`, `identity.py` uses `session_pid_sig` — so the invariant is the `slack`/`dashboard` direction, not an exhaustive dependency list.
 
 Slack's transport path is gated behind the `messaging.use_transport` config flag (default `true` in Kiro Crew, so the abstraction is the canonical path); when off, Slack's native `handle_message` path runs instead.
 
@@ -34,9 +34,9 @@ Slack's transport path is gated behind the `messaging.use_transport` config flag
 | `messaging/__init__.py` | Package facade re-exporting the public contracts, approval-mode constants, and Layer-3 helpers |
 | `messaging/transport.py` | **Layer 1** — `MessagingTransport` ABC + the `TransportCapabilities`, `InboundMessage`, and `ConfiguredChannelTarget` value objects (stdlib-only) |
 | `messaging/driver.py` | **Layer 2** — `TurnDriver` (channel-neutral turn loop), approval-mode constants, `_redact` helper |
-| `messaging/renderer.py` | **Layer 2b** — `Renderer` ABC, `OutputEvent`, output-kind constants + `OUTPUT_KINDS`, `chunk_text` helper, `apply_options_cap`/`cap_choices`/`format_overflow` (`max_buttons` enforcement) |
+| `messaging/renderer.py` | **Layer 2b** — `Renderer` ABC, `OutputEvent`, output-kind constants + `OUTPUT_KINDS`, `chunk_text` helper, `apply_options_cap`/`cap_choices`/`format_overflow` (`max_buttons` enforcement), and `render_options_as_text` — the whole trailer path for a zero-widget channel |
 | `messaging/display_safety.py` | `strip_ansi` / `canonicalize_display` / `redact_for_display` — credential redaction against the form a platform RENDERS, not the bytes sent. Hoisted out of `slack/format.py` when the shared overflow sink began writing choice text into the parsed body on every widget channel |
-| `messaging/split.py` | `split_markdown_safe` — the shared fence-safe markdown splitter (stdlib-only, pure). Prefix-stable so streaming callers can send sealed chunks and keep only the last as a live buffer. Also exports `iter_fence_spans`, the same fence machine viewed as character spans over a whole message |
+| `messaging/split.py` | `split_markdown_safe` — the shared fence-safe markdown splitter (stdlib-only, pure). Prefix-stable so streaming callers can send sealed chunks and keep only the last as a live buffer. Also exports `iter_fence_spans`, the same fence machine viewed as character spans over a whole message, and `truncate_utf8`, the byte-budget guard every byte-capped channel shares |
 | `messaging/outbound_files.py` | `extract_local_refs` (+ `extract_local_refs_off_loop`) — pulls local markdown image references out of an outbound reply into `OutboundFile` payloads carrying the validated bytes, with `Rejection` reasons for everything refused. Also `iter_local_refs` / `hide_local_refs`, the text-only scan a streaming channel uses to keep the markup off live frames. Channel-neutral; the upload stays per-transport |
 | `messaging/raster.py` | `sniff_raster_mime` — what counts as a raster, decided by leading bytes. Dependency-free (no `kiro_crew` imports) so both the inbound sniff and the outbound extractor can share it |
 | `messaging/link.py` | **Layer 3** — session-key namespacing (`session_key`/`canonical_key`/`legacy_key`/`is_legacy_slack_key`) + `ChannelLink` + DM-scope key derivation / `should_rotate_generation` |
@@ -67,7 +67,7 @@ Declares what a channel can do. Defaults are deliberately conservative (the What
 | `rich_blocks` | `False` | feature flag |
 | `threads` | `False` | feature flag |
 | `max_message_chars` | `4096` | quantitative — Slack ~40000, Telegram 4096, Discord 2000, WhatsApp 4096 |
-| `max_buttons` | `3` | TOTAL interactive choices per prompt (WhatsApp reply buttons = 3); enforced via `apply_options_cap` — overflow degrades to a numbered text list |
+| `max_buttons` | `3` | TOTAL interactive choices per prompt (WhatsApp reply buttons = 3); enforced via `apply_options_cap` — overflow degrades to a numbered text list, and at `0` the WHOLE list does (`render_options_as_text`) |
 | `supports_proactive_send` | `True` | send-policy (WhatsApp: `False` outside its 24h window) |
 
 `to_dict()` serializes all fields. The integer *parameters* (not booleans) capture where channels differ quantitatively so the `Renderer` can chunk / degrade rather than assume a single shape.
@@ -167,6 +167,26 @@ pipelines — it drives its own gateway and is gated by `slack_mirror_is_paused`
 
 Pure helper Renderers use to honor `capabilities.max_message_chars`. Returns `[]` for empty input; a non-positive `max_chars` disables chunking (single chunk); otherwise splits into `max_chars`-sized pieces. Together with the `max_buttons` cap this is how a renderer *degrades* an over-cap message or choice set for a lower-capability channel.
 
+### `[OPTIONS:]` on a zero-widget channel (`render_options_as_text`)
+
+`max_buttons == 0` means the channel renders no tappable widget. It does **not** mean the choices are disposable: they are the answers to the question the body just asked, so deleting them leaves the user reading a prompt with no way to see what it offered. Five channels declare `0` — WeCom, Weixin, Teams, Webex, iMessage — and each routes its accumulated text through `render_options_as_text(text, capabilities)`, which:
+
+- matches the trailer with the shared `constants.OPTIONS_RE_TRAILER`, anchored at the very END of the text, so a quoted `[OPTIONS:` mid-answer cannot swallow the body between it and some later `]`;
+- parses the choices and hands them to `apply_options_cap`, which needs no zero-widget branch of its own — `cap_choices` keeps nothing and overflows everything at `max_buttons <= 0`, so every choice is appended through `format_overflow(choices, start=0)`. A button-less channel is the all-overflow case, which means the numbered list, its `display_safe` credential redaction and its ZWSP mention-defang are the same code the widget channels' overflow tail already used — a second sink for LLM-authored choice text is what this avoids;
+- returns an UNFINISHED `[OPTIONS` tail untouched, which is a deliberate change from the five per-channel `_strip_options` copies this replaced. They cut it as "a marker still arriving", true only of a LIVE frame — and the helper cannot tell a live frame from a sealed answer. Four of the five callers never stream, so for them the cut was permanent loss of authored prose; the price of keeping it is a transient, self-correcting flash on the one channel that does stream. A reply ending `see the [OPTIONS section` keeps its last four words. Stripping a genuine steering frame is `TurnDriver`'s job, upstream of any renderer.
+
+A channel that gains a real widget stops calling this and calls `apply_options_cap` directly. `test/test_options_cap_contract.py` carries both ratchets: every channel declaring `> 0` needs a widget pin, every channel declaring `0` needs a text-fallback pin, and their union must be the whole shipped set.
+
+### Byte-capped channels (`truncate_utf8`)
+
+`max_message_chars` is a CHARACTER budget, and two channels' wires cap a message in UTF-8 **BYTES** — Webex at `WEBEX_MAX_TEXT`, WeCom at `WECOM_MAX_REPLY_BYTES`. The field cannot express the difference, so a byte number declared there reads as a large-but-legal character count and nothing fails until a multibyte reply is refused on the wire.
+
+Two things are shared, and the third is deliberately not:
+
+- **The declaration is `<byte budget> // 4`** (`WEBEX_SAFE_MESSAGE_CHARS`, `WECOM_SAFE_MESSAGE_CHARS`) — worst-case safe at four bytes per character, so a caller that budgets in characters without inspecting the text (the dashboard mirror leg) cannot overshoot. `test_capability_ledger.py` asserts the `* 4 <=` relation per channel.
+- **`split.truncate_utf8` is the exact guard at the wire**, applied by the client immediately before the send. It never splits a code point, and a non-positive budget disables it rather than emptying the message. It LOSES the tail, so it is a backstop and never a delivery strategy.
+- **How a channel SPLITS stays the channel's own decision**, because the pessimism in the declaration is only necessary when the text is unknown. Webex chunks with its own `chunk_utf8` against the real byte budget. WeCom measures the finished answer: under the byte cap it ships as one bubble, and only a genuinely oversize answer is split at the worst-case character budget — so an ASCII reply is not cut into four for a limit it never approached.
+
 ## Fence-safe splitting (`split.py`)
 
 `split_markdown_safe(text, limit, *, reserve=0) -> list[str]` is the shared markdown splitter every channel converges on. `chunk_text` above is blind fixed-width and the remaining per-channel splitters (Telegram's `_split_text`/`_split_markdown`, `slack/format.py::split_message`, the Webex and Weixin helpers) each carry their own fence handling, so a fix landed in one never reached the others. The module is stdlib-only and pure — no config objects, no modes.
@@ -225,6 +245,8 @@ Session keys are namespaced as `f"{channel_type}:{conversation_id}"` (`session_k
 - `is_legacy_slack_key(key)` — True iff `key` is a bare Slack `thread_ts` (matched by `_SLACK_TS_RE = r"\d+\.\d+"`, digits + one dot).
 - `canonical_key(key)` — normalizes a bare legacy key to `slack:<thread>`; non-legacy keys (`dashboard:`, `channel:`, `slack:`, …) pass through unchanged. `SessionMap._load` (called from `__init__`) migrates bare keys and populates a Layer-3 `ChannelLink`; `get()`/`set()` re-canonicalize so a not-yet-updated caller passing a bare `thread_ts` still resolves.
 - `legacy_key(key)` — returns the bare `thread_ts` for a `slack:<thread>` key, else `None`.
+
+**Three sets classify a channel key, and they are narrower in that order.** `is_channel_session_key` (here) covers EVERY namespace in `CHANNEL_SESSION_NAMESPACES`, including the reply-token-bound ones — it answers "does this persisted session deserve a chat slot?". `autonudge._CHANNEL_KEY_PREFIXES` is that set minus `wecom`, and is spelled out in `autonudge.py` rather than derived from here: `autonudge` is imported at module scope by `mcp_core` and the dashboard chat layer, and naming `messaging.link` runs `messaging/__init__`, which pulls the driver/renderer/transport layer and with it the ACP client, agent, hooks, artifacts, metrics and sqlite (measured: 48 extra `kiro_crew` modules for one tuple of literals). `wecom` is excluded as a documented decision, not an omission — `WECOM_CAPABILITIES.supports_proactive_send` is `False` because a WeCom reply is bound to the inbound request's own reply token, so a nudge cycle would wake, spend a turn and have nowhere to put the answer. That membership is a *key-shape* claim ("this key names a conversation, not a chat slot") which selects the loop's re-arm strategy and expiry-notice metadata, NOT a deliverability claim: whether a send succeeds stays with the fail-closed ladder in `dashboard/chat_runner.py` (`_resolve_channel_target`: governance → a registered transport → `supports_proactive_send`), which logs its reason and degrades. Narrowest is `autonudge.binding_key_for`, the "may this session be armed?" answer — still `slack:`/`discord:` only, because honouring an arm additionally needs an ownership check in `autonudge_authz` and a fire route in the gateway's `_fire` dispatcher, and both are implemented for those two alone. Widen it only together with that pair.
 
 `ChannelLink(channel_type, channel_id=None, thread_id=None)` records the inbound channel a session belongs to (its **own** channel), with `to_dict()`/`from_dict()`. It is deliberately distinct from the dashboard→Slack *mirror* binding, which stays behind `SessionMap.get/set_slack_link` and is **not** modeled here (guardrail G3).
 
@@ -448,6 +470,30 @@ defensive raw-marker parser only for callers that bypass `TurnDriver`.
 
 ## Slack reference implementation
 
+Slack is the reference for the LAYERS — transport contract, renderer, turn dispatch —
+not for its feature list. Two things Slack carries are **deliberately not replicated
+on any other channel, and are not parity gaps**:
+
+- **A per-channel YOLO / auto-approve switch** (`!yolo`, `set_yolo_mode`,
+  `grant_declared_yolo`). Approval posture is a property of the AGENT, not of the
+  surface a message arrived on: a second place to turn approvals off is a second
+  place to forget one is off, and it means the same session's ceiling depends on
+  which app the user happened to type into. The harness-level opt-in
+  (`kirocrew gateway --approval yolo`, which refuses to start outside an explicit
+  non-default `KIROCREW_HOME`) is the only one, and it stays the only one.
+- **A per-channel redirect seam.** Where a reply goes is answered in ONE place — the
+  session's origin binding, which `drive_turn` owns for every channel on the shared
+  pipeline. Each channel opts in by supplying `ChannelTurn.origin_location`, and
+  today only WeChat does (Teams, Webex and iMessage declare proactive send but stay
+  unbound until their own conversation addressing is verified — Teams' send needs a
+  service URL a bare `ChannelLink` does not carry). That is a per-channel opt-in into
+  one router, which is exactly the property a channel-local redirect would destroy:
+  it makes a second router for the same question, and the two disagree the moment
+  either changes.
+
+A future parity audit that finds these missing on WeCom, WeChat, Discord, Telegram,
+Teams, Webex or iMessage has found a decision, not a gap. Do not close it.
+
 ### `SlackTransport` (`slack/transport.py`)
 
 Wraps `SlackClientOps` in the Layer-1 contract; declares Slack's real (rich-end) capabilities: `streaming/edit/reactions/files/rich_blocks/threads=True`, `max_message_chars=40000`, `max_buttons=5`. `authorize()` is **deny-by-default & owner-only** — an empty `allowed_users` frozenset (copied at construction so it can't mutate mid-decision) authorizes nobody, and every denial (including empty/missing `user_id`) is SEL-audited (`operation="slack_transport.authorize"`, `outcome="denied"`). `receive()` acks → drops bot-authored events (`bot_id` / `subtype == "bot_message"`) before authorization → normalizes to `InboundMessage` → authorizes → invokes the injected `dispatch` callback. The client is held **and exposed** via a `client` property (guardrail G2).
@@ -477,7 +523,10 @@ Full new-path dispatch: fires the ack reaction + working status immediately (con
 - **Redaction is unconditional**: all LLM/tool-originated text flowing through `TurnDriver` passes `redact_exfiltration_urls()` + `redact_credentials()` before reaching any renderer.
 - **Protocol metadata is not assistant speech**: streamed steering frames are withheld until complete, removed even when split across chunks, and represented as a structured boundary. Summary-bearing compaction activity is never sent to a channel as assistant speech; only a terse receipt may be rendered. `[OPTIONS: …]` remains user-facing and is never stripped by the shared filter.
 - **Conservative capability defaults**: unspecified `TransportCapabilities` degrade safely (WhatsApp-like floor), and renderers must honor `max_message_chars` (`chunk_text`) and `max_buttons`.
-- **A media-only inbound message is a message**: a transport whose text extraction comes back empty may only drop the envelope when there are also no media items. Weixin previously returned early on empty text, so an uncaptioned screenshot was discarded with no reply and no log line — the sender saw a successful send while the agent was never told anything arrived. Emptiness is a reason to drop only when the whole envelope is empty.
+- **A media-only inbound message is a message**: a transport whose text extraction comes back empty may only drop the envelope when there are also no media items. Weixin previously returned early on empty text, so an uncaptioned screenshot was discarded with no reply and no log line — the sender saw a successful send while the agent was never told anything arrived. Emptiness is a reason to drop only when the whole envelope is empty. A transport with **no** download path can answer without pretending to ingest, and WeCom is the first to: it declares `files_inbound=False` and, for an authorized sender whose frame carries no text and a RECOGNISED media `msgtype` (image / voice / video / file / `mixed`), replies with a refusal naming the kind and audits it. An UNRECOGNISED kind stays a silent drop, so a system or event frame the user never composed provokes no unsolicited reply — and `mixed` is on the list because the vendor marks the other four single-chat-only, making it the one non-text kind a GROUP can send (`outcome="media_unsupported"` on the channel's ordinary `receive` operation, so a query grouping receive-path denials cannot miss it). Three orderings are load-bearing — `authorize` runs BEFORE the refusal, so an unallowlisted stranger still learns nothing; the per-message `inbound_permitted` gate runs before it too, because this reply is produced in the TRANSPORT and never reaches the dispatcher's gate, so a host profile that denies the channel after startup would otherwise still see the bot talk; and `msgtype` is wire content, so it is mapped through a known label set before it reaches either the reply or the audit row rather than being echoed back. **Teams, Webex and iMessage are also `files_inbound=False` and still drop silently**; converging them (behind a shared predicate, so a fourth channel cannot forget) is follow-up work, and until it lands this bullet describes one channel's behavior rather than an enforced invariant.
+- **A reply over the cap is SPLIT, never sliced**: a channel may not deliver a truncated answer silently. WeCom was the last one that did — its renderer sliced at the character cap and the tail was gone. Because a WeCom stream frame *replaces* one bubble by definition, the overflow cannot ride the same bubble: `on_done` splits the sealed answer with `split_markdown_safe` (off-loop; the splitter is regex-heavy) and sends each remaining part through `WeComClient.send_bubble`, an ADDITIONAL bubble under the same `req_id`, which is also how the dispatcher's threshold notices are delivered — one spelling of "fresh `stream_id`, finished", since reusing an id replaces a bubble rather than adding one. Live intermediate frames still keep only a leading window, which loses nothing because the frame is transient and the full text stays in the buffer. A character budget is not sufficient on its own — `split_markdown_safe` documents a chunk that may exceed `limit` by the fence scaffolding it synthesizes, and a fence delimiter is arbitrarily long (a 4000-emoji opener measured 21 007 bytes against the 20 000-byte wire). No conservative character budget closes that gap: the scaffolding's size is a property of the text, not a constant to subtract. So each part is checked in BYTES and an over-budget one is re-chunked with `chunk_utf8` rather than truncated — **per part**, so the fence-safe boundaries the splitter found for every other part survive, and losing markdown fidelity across the offending part's cuts is the entire price. The same fallback catches the degenerate case from the other end, and it is checked TWICE, deliberately. A chunk cut inside a fence must carry the delimiter line twice (reopener + synthetic closer), so when that line alone does not fit the per-chunk budget every chunk is over-limit by construction, each one re-splits, and the output grows multiplicatively — a 20 002-character answer built from a 5001-backtick line measured 15 002 parts and 150 MB. That case is refused BEFORE the splitter runs, by one O(n) scan for the longest fence delimiter line, because on a gateway serving many sessions the allocation itself is the failure rather than a wasted millisecond. The threshold is DERIVED, not chosen: content budget per chunk is `limit - 2*marker`, so amplification is `limit / (limit - 2*marker)`, and bounding that by `_MAX_SCAFFOLD_RATIO` gives `2*R*marker >= (R-1)*limit`. Testing only whether the marker FITS is not enough — at `marker = limit/2 - 1` the line fits and leaves two characters of content per chunk, which is ~10 000 chunks for a 20 000-character body. `_MAX_SCAFFOLD_RATIO` then remains as the backstop for a blowup the predicate does not model: one bound expressed twice, predicted and then measured, so changing the ratio moves both. Neither one caps the bubble count — a fixed cap would re-introduce the truncation this section exists to remove. The exception is the point: swallowing it would leave the user holding part of an answer while `drive_turn` ran `record_success` and persisted the WHOLE text as delivered, so the transcript would disagree with what the user can read and nothing downstream could tell. Reaching `drive_turn`'s except branch records the failure instead; `renderer.close()` is the teardown path and suppresses it, because by then the turn is already unwinding. Same contract as the Weixin renderer's `_send`. A server-side refusal is NOT covered by that seam today: a non-zero `errcode` ACK is logged and dropped, so a frame the server rejected still records a successful turn. An ABSENT `response_url` is checked separately from the byte loss, because it is a TOTAL loss wearing the same clothes: `send_reply("")` logs and returns rather than raising, so a dead stream plus an empty URL plus an answer that fits the cap leaves `lost == 0` and nothing else would have failed the turn — `record_success` would persist the whole text for a reply that had no channel to travel on. Reachable whenever a frame that HAS a `req_id` fails its stream write, which is exactly when the fallback matters most.
+
+That leaves exactly ONE lossy delivery path, and it is unavoidable: the dead-stream fallback. `response_url` permits one reply and there is no second frame to hold a remainder, so an oversize answer loses its tail to the client's byte guard — it is delivered FIRST (a truncated answer beats none) and the turn then fails, because returning normally would let `drive_turn` persist the whole text as delivered while the user holds a cut-off answer. This has no shared enforcement yet — `max_buttons` has `test_options_cap_contract.py`, this has per-channel tests only.
 - **Weixin inbound media is CDN-indirect**: iLink envelopes never carry bytes, only a `CDNMedia` reference (`encrypt_query_param` + `aes_key`) whose object is AES-128-ECB encrypted on the WeChat CDN. `weixin/media.py` owns that protocol work (URL construction with percent-encoded params, key decoding, decrypt, a streaming size cap enforced on bytes read rather than `Content-Length`); `weixin/attachments.py` maps the four CDN-backed item types onto the shared `Attachment` and hands them to `messaging/attachments.py`, which keeps classification, limits, signature validation and temp-file ownership channel-neutral. The `aes_key` field carries **two** encodings for the same value — `base64(raw 16 bytes)` for images, `base64(ascii hex)` for file/voice/video — discriminated by decoded length plus a strict hex check, because guessing wrong yields plausible garbage rather than an error. A voice item that already carries server-side `text` short-circuits the download: iLink voice is SILK, which no shipped transcription backend decodes, so the local path is strictly worse than the transcript the server gave us. `files_inbound=True` reflects this; `files_outbound` stays `False` until the `getuploadurl` + encrypted CDN PUT half lands.
 - **A mid-turn queue receipt is edited, never deleted**: it flips in place to `▶️ Now answering` on drain and to `🛑 Cancelled` on `/stop`. It is the durable record that a held message was accepted, so no path may delete it.
 - **A queued burst drains as ONE turn**: `_drain_queue` joins the held texts in arrival order into a single combined turn (capped by `_MAX_COLLAPSE` and, on Discord, the attachment ingest limit), never N replayed turns. Anything past a cap is re-enqueued together with everything behind it so FIFO order stays exact.
@@ -714,8 +763,9 @@ start, tool-progress status edits are throttled and budgeted to 6 of the 10
 edits (an edit failure burns the remaining budget so the final-answer edit
 can never race the cap), and the final answer lands as one placeholder edit
 with a fresh-message fallback plus chunked follow-ups past the 7000-char cap.
-Trailing `[OPTIONS:]` markup is stripped (`max_buttons=0`); interactive tool
-approvals run decider-less (deny-by-default under INTERACTIVE mode).
+A trailing `[OPTIONS:]` trailer becomes a numbered text list (`max_buttons=0`,
+via the shared `render_options_as_text`); interactive tool approvals run
+decider-less (deny-by-default under INTERACTIVE mode).
 
 ## Webex settings API
 
@@ -737,6 +787,24 @@ approvals run decider-less (deny-by-default under INTERACTIVE mode).
   crash between the two cannot resurrect the plaintext copy). Writes are
   serialized under the repo-wide config lock. All fields are boot-read, so
   `restart_required` is true on any actual change.
+
+### WeCom acks: bubble first, `response_url` as fallback
+
+`response_url` is NOT present on every inbound frame — a text callback can arrive
+carrying only a `req_id` — and `WeComClient.send_reply` with an empty URL is a no-op.
+So every out-of-band ack in `wecom/transport_dispatch.py` (`/new`, `/help`, `/stop`,
+`/compact`, the steer receipts, the threshold notices) goes through ONE helper,
+`WeComDispatcher._ack`, which writes a WS bubble when a `req_id` is in hand and only
+falls back to `response_url` otherwise. A refusal (`send_bubble` returning `False`)
+also falls back, because a refusal is not a delivery.
+
+`WeComTransport._refuse_media` uses the same order for the same reason. The two are
+kept in the same shape deliberately: they diverged once — the media refusal was fixed
+and twelve acks were left posting straight to a URL that may not exist, which is
+silence in answer to `/help` — and one helper per side is what keeps a third ack from
+being written on the unreliable path. Pinned by
+`test_wecom_dispatch.py::TestAcksSurviveAMissingResponseUrl`, which asserts both
+directions plus the refused-bubble case.
 
 ## WeCom settings API
 
@@ -842,7 +910,7 @@ the only progress signal the channel has.
 **Capabilities.** `streaming=False` and `edit=False` (no message mutation
 exists), `reactions=False`, `files_inbound=False`, `files_outbound=False`,
 `threads=False`, `max_buttons=0` (no tappable choices — a trailing `[OPTIONS:]`
-trailer is stripped like on the other button-less channels),
+trailer becomes a numbered text list like on the other button-less channels),
 `supports_proactive_send=True` (a Mac may message a handle at any time; there is
 no 24-hour window), `supports_session_resume=False` (inbound routes off the
 handle, not a mirrored session binding). `max_message_chars=4000` is declared

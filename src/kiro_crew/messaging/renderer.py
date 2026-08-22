@@ -14,9 +14,10 @@ degrades to a numbered text list the user can answer by typing. The cap is
 ENFORCED (see ``test/test_capability_ledger.py``) and pinned per channel by
 the cross-channel contract test in ``test/test_options_cap_contract.py`` —
 a widget-capable renderer that skips the helper fails that test.
-Channels declaring ``max_buttons=0`` render no widget and today strip the
-trailer entirely; the numbered-text fallback for them lands with the
-approval-ladder work.
+Channels declaring ``max_buttons=0`` render no widget and route the whole
+trailer through :func:`render_options_as_text`, which reaches the same helper
+with zero widget slots: every choice becomes a numbered line the user answers by
+typing, rather than being deleted along with the trailer.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from kiro_crew.constants import OPTIONS_RE_TRAILER
 from kiro_crew.messaging.display_safety import redact_for_display
 from kiro_crew.messaging.transport import TransportCapabilities
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -92,10 +94,11 @@ def cap_choices(
 ) -> tuple[list[str], list[str]]:
     """Split a parsed ``[OPTIONS:]`` list at ``capabilities.max_buttons``.
 
-    Returns ``(kept, overflow)``. ``max_buttons <= 0`` keeps nothing (the
-    zero-widget channels own their trailer handling). Pure — callers that
-    must transform choices before display (Slack redacts at the sink) split
-    here and format overflow themselves via :func:`format_overflow`.
+    Returns ``(kept, overflow)``. ``max_buttons <= 0`` keeps nothing and
+    overflows everything, which is what makes a zero-widget channel the
+    all-overflow case rather than a special case. Pure — callers that must
+    transform choices before display (Slack redacts at the sink) split here and
+    format overflow themselves via :func:`format_overflow`.
     """
     n = capabilities.max_buttons
     if n <= 0:
@@ -177,29 +180,57 @@ def apply_options_cap(
     widget, so the cap lives in shared code and the per-channel contract
     test can pin it.
 
-    Returns ``(body, kept_choices)``:
+    Returns ``(body, kept_choices)``: the first ``max_buttons`` choices are kept
+    for the widget and the remainder is appended to ``body`` as a numbered text
+    list, numbering continued after the widget slots, rather than dropped — so
+    the user still learns those choices exist. A list that fits is a
+    byte-identical pass-through.
 
-    * ``len(choices) <= max_buttons`` — byte-identical pass-through.
-    * overflow — the first ``max_buttons`` choices are kept for the widget;
-      the remainder is appended to ``body`` as a numbered text list
-      (numbering continues after the widget slots) rather than dropped, so
-      the user still learns those choices exist.
-    * ``max_buttons <= 0`` — returns ``(body, [])``; zero-widget channels
-      own their trailer handling (today: strip).
+    ``max_buttons <= 0`` needs no branch of its own: :func:`cap_choices` keeps
+    nothing and overflows everything, so a button-less channel is the
+    all-overflow case and every choice becomes a numbered line through the same
+    sanitising sink. Dropping the list there would delete the answers to a
+    question the agent just asked and leave the user no way to see what was
+    offered.
     """
-    if capabilities.max_buttons <= 0:
-        return body, []
     kept, overflow = cap_choices(choices, capabilities)
     if not overflow:
         return body, kept
     lines = format_overflow(overflow, start=len(kept))
-    if not body:
-        sep = ""
-    elif body.endswith("\n"):
-        sep = "\n"
-    else:
-        sep = "\n\n"
+    sep = "" if not body else ("\n" if body.endswith("\n") else "\n\n")
     return f"{body}{sep}{lines}", kept
+
+
+def render_options_as_text(text: str, capabilities: TransportCapabilities) -> str:
+    """Rewrite a trailing ``[OPTIONS:]`` trailer in *text* as numbered text.
+
+    The whole trailer handling for a channel that renders no widget, so the five
+    that render none share one implementation instead of a copy each. Returns the
+    body only; the widget half of :func:`apply_options_cap` has nothing to keep at
+    ``max_buttons == 0``.
+
+    Only a COMPLETE marker at the very end is recognised, via the shared
+    ``OPTIONS_RE_TRAILER``. Everything else is returned untouched, and both halves
+    of that matter:
+
+    * A quoted ``[OPTIONS:`` mid-answer cannot swallow the body between it and
+      some later ``]`` — the end-of-buffer anchor is what prevents that.
+    * An UNFINISHED ``[OPTIONS`` tail is left alone rather than stripped. It reads
+      like a marker still arriving, but this helper cannot tell a live frame from
+      a sealed answer: four of the five callers never stream at all, so for them
+      such a tail is simply the assistant's prose and cutting it is data loss —
+      permanent, against a transient cosmetic flash on the one channel that does
+      stream, whose next frame replaces the bubble anyway. A reply ending
+      ``see the [OPTIONS section`` keeps its last four words.
+
+    Stripping a genuine steering frame is ``TurnDriver``'s job and happens before
+    a renderer sees the text.
+    """
+    match = OPTIONS_RE_TRAILER.search(text)
+    if not match:
+        return text
+    choices = [c.strip() for c in match.group(1).split("|") if c.strip()]
+    return apply_options_cap(text[: match.start()].rstrip(), choices, capabilities)[0]
 
 
 class Renderer(ABC):
@@ -258,9 +289,7 @@ class Renderer(ABC):
         """
 
     @abstractmethod
-    async def on_prompt_choice(
-        self, options: list[dict[str, Any]], request_id: str | int
-    ) -> None:
+    async def on_prompt_choice(self, options: list[dict[str, Any]], request_id: str | int) -> None:
         """Render an interactive approval/choice prompt (first-class)."""
 
     @abstractmethod
@@ -360,9 +389,7 @@ class SilentRenderer(Renderer):
     ) -> None:
         return None
 
-    async def on_prompt_choice(
-        self, options: list[dict[str, Any]], request_id: str | int
-    ) -> None:
+    async def on_prompt_choice(self, options: list[dict[str, Any]], request_id: str | int) -> None:
         return None
 
     async def on_compaction(self, context_usage_pct: float) -> None:

@@ -7,8 +7,8 @@ Maps the channel-neutral ``OutputEvent`` stream (routed by the base
   (Teams has no in-place edit stream here, so no placeholder message).
 * ``on_tool_call`` -- re-posts ``typing`` (throttled) so the indicator does
   not lapse during a long turn.
-* ``on_text_chunk`` -- buffered only (no typewriter streaming), with any
-  trailing ``[OPTIONS:]`` markup stripped (Teams MVP has no tappable chips).
+* ``on_text_chunk`` -- buffered only (no typewriter streaming); a trailing
+  ``[OPTIONS:]`` trailer becomes a numbered text list (no tappable chips).
 * ``on_prompt_choice`` -- no-op: the driver only dispatches this for
   INTERACTIVE + a decider; Teams runs decider-less (deny-by-default).
 * ``on_compaction`` -- logged only; the dispatcher surfaces threshold notices
@@ -25,8 +25,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from kiro_crew.constants import OPTIONS_RE_TRAILER
-from kiro_crew.messaging.renderer import Renderer, chunk_text
+from kiro_crew.messaging.renderer import Renderer, chunk_text, render_options_as_text
 from kiro_crew.messaging.transport import TransportCapabilities
 
 if TYPE_CHECKING:
@@ -38,27 +37,6 @@ logger = logging.getLogger(__name__)
 _TYPING_THROTTLE_S = 3.0
 
 _ERROR_TEXT = "⚠️ Something went wrong — please try again."
-
-# Trailing "[OPTIONS: a | b | c]" chip trailer (a dashboard convention Teams
-# can't render as tappable chips in the MVP). Defined once in constants.py
-# (shared across surfaces) so the ReDoS-hardened grammar can't drift.
-_OPTIONS_RE = OPTIONS_RE_TRAILER
-
-
-def _strip_options(text: str) -> str:
-    """Remove a trailing ``[OPTIONS: a | b | c]`` chip trailer.
-
-    Teams (MVP) has no tappable chips, so we drop the trailer entirely -- the
-    user just replies naturally. Also hides a partial ``[OPTIONS…`` fragment
-    (no closing ``]``) so it never lands as raw text.
-    """
-    m = _OPTIONS_RE.search(text)
-    if m:
-        return text[: m.start()].rstrip()
-    idx = text.rfind("[OPTIONS")
-    if idx != -1 and "]" not in text[idx:]:
-        return text[:idx].rstrip()
-    return text
 
 
 class TeamsRenderer(Renderer):
@@ -127,9 +105,7 @@ class TeamsRenderer(Renderer):
         content = self.text() or ("…" if ok else _ERROR_TEXT)
         chunks = chunk_text(content, self.capabilities.max_message_chars) or ["…"]
         for chunk in chunks:
-            sent = await self._client.send_message(
-                self._conversation_id, chunk, self._service_url
-            )
+            sent = await self._client.send_message(self._conversation_id, chunk, self._service_url)
             if sent is None:
                 # Stop at the first failed chunk: the delivered prefix is
                 # coherent, and skipping ahead would splice a gap into the
@@ -144,5 +120,5 @@ class TeamsRenderer(Renderer):
 
     # -- helpers ------------------------------------------------------------
     def text(self) -> str:
-        """The turn's visible answer so far (OPTIONS stripped)."""
-        return _strip_options("".join(self._buf).strip())
+        """The turn's answer so far, with ``[OPTIONS:]`` as numbered text."""
+        return render_options_as_text("".join(self._buf).strip(), self.capabilities)

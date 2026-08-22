@@ -85,6 +85,23 @@ function ensureThemeObserver() {
   _themeObserver.observe(document.head, { childList: true })
 }
 
+/** Test-only: drop the module-level theme observer so the next mount rewires it.
+ *
+ * The observer is a module singleton created on the FIRST terminal mount, which is
+ * correct in the app (multiple terminal tabs must not each spawn one) and wrong
+ * across a test file: an observer created during an earlier test stops delivering
+ * `<head>` childList records, so a later test's custom-theme insertion is never
+ * seen and the assertion fails on test ORDER rather than on behaviour. Resetting
+ * between tests is what makes signal (2) verifiable at all. Mirrors
+ * `__resetTerminalFontStore`.
+ */
+export function __resetThemeObserver(): void {
+  _themeObserver?.disconnect()
+  _themeObserver = null
+  if (_themeRaf) cancelAnimationFrame(_themeRaf)
+  _themeRaf = 0
+}
+
 /* ── Terminal font sync ──
  * Push the app-wide terminal font preference (useTerminalFont) onto every
  * cached xterm instance when it changes. Font family and size are canvas cell

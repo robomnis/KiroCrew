@@ -3548,9 +3548,7 @@ class TestOrchestratorWatchdogThemeAreParsed:
                 captured.append(kwargs)
 
         monkeypatch.setattr(acp_mod, "AcpProvider", _FakeProvider)
-        cfg = _load_from_dict(
-            {"agents": {"pr-reviewer": {"kiro_agent": "pr-reviewer-kiro"}}}
-        )
+        cfg = _load_from_dict({"agents": {"pr-reviewer": {"kiro_agent": "pr-reviewer-kiro"}}})
         factory = cfg.create_provider_factory()
 
         factory("k1", agent="pr-reviewer-kiro", crew_agent="pr-reviewer")
@@ -4970,10 +4968,9 @@ class TestMigrationBackupContainment:
     _LEGACY = {"telegram": {"allow_forum": True}}
 
     def _load_with(self, home: Path, cfg_file: Path) -> KiroCrewConfig:
-        with unittest.mock.patch(
-            "kiro_crew.config.loader.config_dir", return_value=home
-        ), unittest.mock.patch(
-            "kiro_crew.config.loader.config_path", return_value=cfg_file
+        with (
+            unittest.mock.patch("kiro_crew.config.loader.config_dir", return_value=home),
+            unittest.mock.patch("kiro_crew.config.loader.config_path", return_value=cfg_file),
         ):
             return KiroCrewConfig.load()
 
@@ -4993,8 +4990,8 @@ class TestMigrationBackupContainment:
         # Guard the guard: assert the migration branch actually ran, otherwise
         # this test would pass for the wrong reason if that branch stops firing.
         assert cfg.agents, "migration write-back did not run, test is vacuous"
-        assert after == before, (
-            "load() left orphans beside the caller's config: %s" % sorted(after - before)
+        assert after == before, "load() left orphans beside the caller's config: %s" % sorted(
+            after - before
         )
 
     def test_real_config_in_the_data_home_is_still_backed_up(self, tmp_path: Path) -> None:
@@ -5101,9 +5098,7 @@ class TestTransportThresholdConsistency:
         # An inverted pair (soft=90, hard=50) would make the soft nudge
         # unreachable -- the transports check pct >= hard first.
         section = self._section(
-            _load_from_dict(
-                {transport: {"soft_threshold_pct": 90, "hard_threshold_pct": 50}}
-            ),
+            _load_from_dict({transport: {"soft_threshold_pct": 90, "hard_threshold_pct": 50}}),
             transport,
         )
         assert section.hard_threshold_pct == 50
@@ -5149,10 +5144,113 @@ class TestTransportThresholdConsistency:
         cfg = _load_from_dict(
             {
                 "telegram": {
-                    "accounts": {
-                        "acct-1": {"bot_token": "123:abc", "soft_threshold_pct": 400}
-                    }
+                    "accounts": {"acct-1": {"bot_token": "123:abc", "soft_threshold_pct": 400}}
                 }
             }
         )
         assert cfg.telegram.accounts["acct-1"].soft_threshold_pct == 100
+
+
+#: One non-default sample per ``WeComConfig`` field, keyed by field name. The map
+#: must cover EVERY field: ``load()`` enumerates the section's keys by hand, so a
+#: field added to the dataclass but forgotten there loads as its default and is
+#: then written back as its default — the operator's setting is both ignored and
+#: erased, with nothing failing. `allow_group_chats` shipped that way and made the
+#: whole group feature unreachable from config. This map is the ratchet: a new
+#: field fails the test below until a sample is added, which forces the author
+#: through the load path.
+_WECOM_FIELD_SAMPLES: dict[str, object] = {
+    "enabled": True,
+    "allowed_users": [{"userid": "zhangsan", "name": "Z"}],
+    "allow_all_users": True,
+    "allow_group_chats": True,
+    "allowed_chat_ids": ["chat-1", "chat-2"],
+    "ws_url": "wss://example.invalid/ws",
+    "soft_threshold_pct": 71,
+    "hard_threshold_pct": 91,
+    "session_folder": "wecom-folder",
+}
+
+
+class TestWeComSectionSurvivesLoad:
+    def test_the_sample_map_covers_every_field(self) -> None:
+        import dataclasses
+
+        declared = {f.name for f in dataclasses.fields(loader_module.WeComConfig)}
+        missing = declared - set(_WECOM_FIELD_SAMPLES)
+        assert not missing, (
+            f"WeComConfig gained field(s) {sorted(missing)} with no sample here. Add one, "
+            "and check KiroCrewConfig.load() actually reads the key -- it enumerates them "
+            "by hand, so an omission silently discards the operator's value."
+        )
+        assert not set(_WECOM_FIELD_SAMPLES) - declared, "sample for a field that no longer exists"
+
+    @pytest.mark.parametrize("field_name", sorted(_WECOM_FIELD_SAMPLES))
+    def test_each_configured_value_survives_load(self, field_name: str) -> None:
+        sample = _WECOM_FIELD_SAMPLES[field_name]
+        cfg = _load_from_dict({"wecom": {field_name: sample}})
+        loaded = getattr(cfg.wecom, field_name)
+        default = getattr(loader_module.WeComConfig(), field_name)
+        assert loaded != default, (
+            f"wecom.{field_name} loaded as its default {default!r} despite being configured "
+            f"as {sample!r} -- KiroCrewConfig.load() is not reading the key"
+        )
+
+    def test_the_group_keys_round_trip_through_to_dict(self) -> None:
+        # The erase half of the defect: a section that loads as its default is
+        # written back as its default, so the next save destroys the stored value.
+        cfg = _load_from_dict(
+            {"wecom": {"allow_group_chats": True, "allowed_chat_ids": ["chat-1"]}}
+        )
+        assert cfg.wecom.allow_group_chats is True
+        assert cfg.wecom.allowed_chat_ids == ["chat-1"]
+        again = _load_from_dict(cfg.to_dict())
+        assert again.wecom.allow_group_chats is True
+        assert again.wecom.allowed_chat_ids == ["chat-1"]
+
+    @pytest.mark.parametrize("junk", [None, 7, "chat-1", {"a": 1}, True])
+    def test_a_non_list_allow_list_degrades_to_empty_rather_than_crashing_load(
+        self, junk: object
+    ) -> None:
+        # An explicit `null`, or any non-list, must not raise out of load(): a
+        # config file the operator can write is not a trusted type, and a TypeError
+        # here prevents STARTUP rather than degrading one setting. A bare string is
+        # the subtle one -- iterating it would char-split into single-letter chatids.
+        cfg = _load_from_dict({"wecom": {"allowed_chat_ids": junk, "allowed_users": junk}})
+        assert cfg.wecom.allowed_chat_ids == []
+        assert cfg.wecom.allowed_users == []
+
+    @pytest.mark.parametrize("field", ["enabled", "allow_all_users", "allow_group_chats"])
+    @pytest.mark.parametrize("junk", ["false", "off", "0", 0, 1, [], {}, None, "true"])
+    def test_a_non_bool_never_turns_a_switch_ON(self, field: str, junk: object) -> None:
+        # `bool("false")` is True, so a JSON string would invert the operator's
+        # intent. For allow_group_chats that is a disclosure boundary: every member
+        # of a group would start receiving the agent's tool output with nobody having
+        # opted in. Even the "helpfully" correct-looking "true" must not enable it --
+        # guessing at a string means the same parse cannot refuse "false".
+        cfg = _load_from_dict({"wecom": {field: junk}})
+        assert getattr(cfg.wecom, field) is False
+
+    @pytest.mark.parametrize("field", ["enabled", "allow_all_users", "allow_group_chats"])
+    def test_a_real_bool_still_works(self, field: str) -> None:
+        cfg = _load_from_dict({"wecom": {field: True}})
+        assert getattr(cfg.wecom, field) is True
+
+    def test_chat_ids_are_stored_stripped_so_membership_can_match_the_wire(self) -> None:
+        # Validating on c.strip() while storing c would keep " chatABC ", which never
+        # equals the wire's "chatABC" under the exact frozenset membership test in
+        # _group_permitted — so an explicitly allow-listed group would be denied and
+        # audited as denied_group_chat with nothing pointing at the config.
+        cfg = _load_from_dict(
+            {"wecom": {"allowed_chat_ids": [" chatABC ", "chatDEF\n", "\tchatGHI"]}}
+        )
+        assert cfg.wecom.allowed_chat_ids == ["chatABC", "chatDEF", "chatGHI"]
+
+    def test_junk_chat_ids_are_dropped_rather_than_carried(self) -> None:
+        # chatids reach a security decision (_group_permitted), so a non-string or
+        # blank entry must not become a frozenset member that matches nothing --
+        # or, worse, an empty string that a malformed frame could match.
+        cfg = _load_from_dict(
+            {"wecom": {"allowed_chat_ids": ["chat-1", "", "   ", None, 7, {"a": 1}]}}
+        )
+        assert cfg.wecom.allowed_chat_ids == ["chat-1"]

@@ -10,7 +10,7 @@ import pytest
 from kiro_crew.acp.types import EVENT_COMPLETE, EVENT_TEXT_CHUNK, AcpEvent
 from kiro_crew.messaging import TurnDriver
 from kiro_crew.teams.commands import HELP_TEXT, parse_command
-from kiro_crew.teams.renderer import TeamsRenderer, _strip_options
+from kiro_crew.teams.renderer import TeamsRenderer
 from kiro_crew.teams.transport import TEAMS_CAPABILITIES
 
 
@@ -62,17 +62,6 @@ class TestCommands:
         assert "/new" in HELP_TEXT and "/help" in HELP_TEXT
 
 
-class TestStripOptions:
-    def test_strips_trailer(self) -> None:
-        assert _strip_options("answer\n[OPTIONS: a | b | c]") == "answer"
-
-    def test_strips_partial(self) -> None:
-        assert _strip_options("answer [OPTIONS: a | b") == "answer"
-
-    def test_leaves_plain_text(self) -> None:
-        assert _strip_options("just an answer") == "just an answer"
-
-
 class TestRenderer:
     @pytest.mark.asyncio
     async def test_typing_then_single_answer(self) -> None:
@@ -86,13 +75,13 @@ class TestRenderer:
         assert client.sent == ["Hello world"]
 
     @pytest.mark.asyncio
-    async def test_options_trailer_dropped_in_final(self) -> None:
+    async def test_options_trailer_becomes_numbered_text_in_final(self) -> None:
         client = _FakeClient()
         r = _renderer(client)
         await r.on_turn_start()
         await r.on_text_chunk("pick one\n[OPTIONS: yes | no]")
         await r.on_done()
-        assert client.sent == ["pick one"]
+        assert client.sent == ["pick one\n\n1. yes\n2. no"]
 
     @pytest.mark.asyncio
     async def test_over_cap_reply_chunked_without_loss(self) -> None:

@@ -508,11 +508,16 @@ gen, dm_scope)`:
 - **Shape** (channel-first): `{channel}:{agent}:{chatType}:{user}` plus an
   optional `:gen{N}` suffix. The part before the suffix is a durable **bucket**
   (history and channel links hang off it); the **generation** rotates to start a
-  fresh transcript within the bucket. `chatType` is `direct` today; `group` is
-  reserved.
+  fresh transcript within the bucket. Three `chatType`s ship: `direct` (a 1:1 DM),
+  `forum` (a Telegram supergroup Topic, whose scope is `{chat_id}:{thread_id}`),
+  and `group` (a whole multi-party conversation — `wecom:{agent}:group:{chatid}`).
+  `group` is deliberately distinct from `forum`: the forum-shaped paths promise
+  per-topic isolation, and a flat group has none to offer.
 - **`dm_scope`** (`MessagingConfig.dm_scope`): `per-channel-peer` (default) —
   one bucket per `(channel, user)`; `unified` — all DMs collapse into a single
-  `unified:{agent}` bucket for cross-surface continuity. `agent` is part of the
+  `unified:{agent}` bucket for cross-surface continuity. **Only `direct`
+  collapses.** A `forum` or `group` route always keeps its full bucket, so private
+  DM content can never land in a shared conversation. `agent` is part of the
   bucket by design, so switching the configured agent starts a fresh session
   rather than replaying another agent's context.
 - **Generation reset** rotates on `/new`, an idle window

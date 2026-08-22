@@ -32,6 +32,8 @@ from typing import Any, Awaitable, Callable
 
 import aiohttp
 
+from kiro_crew.messaging.split import truncate_utf8
+
 logger = logging.getLogger(__name__)
 
 # Webex REST API base.
@@ -40,52 +42,9 @@ _API_BASE = "https://webexapis.com/v1"
 _DEVICE_BASE = "https://wdm-a.wbx2.com/wdm/api/v1"
 
 # Webex caps a message's text/markdown at 7439 BYTES; stay comfortably under.
-# The cap is enforced in UTF-8 bytes (not characters) — see ``truncate_utf8``.
+# The cap is enforced in UTF-8 bytes (not characters) — see ``truncate_utf8``,
+# which every byte-capped channel shares from ``messaging.split``.
 WEBEX_MAX_TEXT = 7000
-
-
-def truncate_utf8(text: str, max_bytes: int = WEBEX_MAX_TEXT) -> str:
-    """Truncate ``text`` to at most *max_bytes* UTF-8 bytes without splitting
-    a code point.
-
-    Webex's message limit is 7439 bytes, so a multibyte-heavy reply can be
-    under the character cap but over the byte limit — Webex would reject the
-    send and the user would get nothing. ``errors="ignore"`` on the decode
-    drops a trailing partial sequence cleanly. Last-resort safety net for
-    single sends; multi-message content must be split losslessly with
-    :func:`chunk_utf8` first.
-    """
-    encoded = text.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return text
-    return encoded[:max_bytes].decode("utf-8", errors="ignore")
-
-
-def chunk_utf8(text: str, max_bytes: int = WEBEX_MAX_TEXT) -> list[str]:
-    """Split ``text`` into chunks of at most *max_bytes* UTF-8 bytes each,
-    never splitting a code point and never dropping content.
-
-    The neutral ``chunk_text`` helper splits by CHARACTERS, but Webex limits
-    BYTES — a multibyte-heavy chunk under the character cap could exceed the
-    byte limit and be silently tail-truncated by the send path, losing the
-    remainder. Splitting on the encoded bytes and re-decoding with
-    ``errors="ignore"`` finds the largest whole-code-point prefix per chunk;
-    the loop then resumes from exactly the characters consumed, so the
-    concatenation of all chunks always equals the input.
-    """
-    if not text:
-        return []
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        encoded = remaining.encode("utf-8")
-        if len(encoded) <= max_bytes:
-            chunks.append(remaining)
-            break
-        piece = encoded[:max_bytes].decode("utf-8", errors="ignore")
-        chunks.append(piece)
-        remaining = remaining[len(piece) :]
-    return chunks
 
 
 # A WS connection must live at least this long to count as "healthy" and reset
@@ -236,7 +195,7 @@ class WebexClient:
         ``@``) to open/reuse the 1:1 space with that person -- the shape
         ``resolve_conversation`` hands proactive senders.
         """
-        payload: dict[str, Any] = {"markdown": truncate_utf8(markdown or "…")}
+        payload: dict[str, Any] = {"markdown": truncate_utf8(markdown or "…", WEBEX_MAX_TEXT)}
         if "@" in conversation_id:
             payload["toPersonEmail"] = conversation_id
         else:
@@ -252,7 +211,7 @@ class WebexClient:
         Webex allows at most 10 edits per message (further edits 400) --
         callers must budget their edits (see WebexRenderer).
         """
-        payload = {"roomId": room_id, "markdown": truncate_utf8(markdown or "…")}
+        payload = {"roomId": room_id, "markdown": truncate_utf8(markdown or "…", WEBEX_MAX_TEXT)}
         result = await self._api("PUT", f"/messages/{message_id}", payload)
         return result is not None
 

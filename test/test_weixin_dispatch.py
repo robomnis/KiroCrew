@@ -16,7 +16,7 @@ from kiro_crew.weixin.client import ContextTokenStore, TypingTicketCache
 from kiro_crew.weixin.commands import parse_command
 from kiro_crew.weixin.transport import WEIXIN_CAPABILITIES
 from kiro_crew.weixin.transport_dispatch import WeixinDispatcher
-from kiro_crew.weixin.turn_renderer import WeixinRenderer, _strip_options
+from kiro_crew.weixin.turn_renderer import WeixinRenderer
 
 
 # ── fakes ─────────────────────────────────────────────────────────────────────
@@ -68,6 +68,7 @@ class FakeProvider:
         self.reply = reply
         self.prompts: list[str] = []
         self.compacted = False
+        self.cancelled: list = []
 
     async def stream(self, message):
         self.prompts.append(message)
@@ -78,6 +79,9 @@ class FakeProvider:
 
     def has_active_turn(self):
         return False
+
+    async def cancel(self, *, wait_ack_timeout: float = 0.0):
+        self.cancelled.append(wait_ack_timeout)
 
     async def compact(self):
         self.compacted = True
@@ -95,6 +99,8 @@ class FakeSessions:
         self.failures = 0
         self.channels: dict[str, str] = {}
         self.acquired = False
+        self.mirror_links: dict[str, object] = {}
+        self.opted_out = False
 
     def is_busy(self, key):
         return self._busy
@@ -131,6 +137,16 @@ class FakeSessions:
         # seed_generation() probes for the highest existing generation; a fresh
         # fake has none.
         return 0
+
+    # ── outbound mirror binding (drive_turn binds the conversation to itself) ──
+    def mirror_opt_out(self, key):
+        return self.opted_out
+
+    def get_mirror_link(self, key):
+        return self.mirror_links.get(key)
+
+    def set_mirror_link(self, key, location):
+        self.mirror_links[key] = location
 
 
 class FakeHooks:
@@ -183,16 +199,10 @@ def _make(tmp_path, provider=None, busy=False):
 
 
 def _msg(text="hi", user="userA"):
-    return InboundMessage(
-        channel_type="weixin", user_id=user, conversation_id=user, text=text
-    )
+    return InboundMessage(channel_type="weixin", user_id=user, conversation_id=user, text=text)
 
 
 # ── renderer ──────────────────────────────────────────────────────────────────
-def test_strip_options_removes_dashboard_only_affordance():
-    assert _strip_options("answer\n[OPTIONS: a | b]") == "answer"
-
-
 def test_renderer_buffers_and_sends_once_on_done(tmp_path):
     client = FakeClient()
     r = WeixinRenderer(
@@ -218,8 +228,11 @@ def test_renderer_buffers_and_sends_once_on_done(tmp_path):
 def test_renderer_on_done_is_idempotent(tmp_path):
     client = FakeClient()
     r = WeixinRenderer(
-        client, "userA", WEIXIN_CAPABILITIES,
-        ctx_store=ContextTokenStore(str(tmp_path)), account_id="acct1",
+        client,
+        "userA",
+        WEIXIN_CAPABILITIES,
+        ctx_store=ContextTokenStore(str(tmp_path)),
+        account_id="acct1",
     )
 
     async def go():
@@ -235,19 +248,25 @@ def test_renderer_on_done_is_idempotent(tmp_path):
 def test_renderer_close_without_done_emits_error_text(tmp_path):
     client = FakeClient()
     r = WeixinRenderer(
-        client, "userA", WEIXIN_CAPABILITIES,
-        ctx_store=ContextTokenStore(str(tmp_path)), account_id="acct1",
+        client,
+        "userA",
+        WEIXIN_CAPABILITIES,
+        ctx_store=ContextTokenStore(str(tmp_path)),
+        account_id="acct1",
     )
     asyncio.run(r.close())
     assert len(client.sent) == 1
     assert "出错" in client.sent[0]["text"]
 
 
-def test_renderer_strips_options_from_the_reply(tmp_path):
+def test_renderer_renders_options_as_numbered_text_in_the_reply(tmp_path):
     client = FakeClient()
     r = WeixinRenderer(
-        client, "userA", WEIXIN_CAPABILITIES,
-        ctx_store=ContextTokenStore(str(tmp_path)), account_id="acct1",
+        client,
+        "userA",
+        WEIXIN_CAPABILITIES,
+        ctx_store=ContextTokenStore(str(tmp_path)),
+        account_id="acct1",
     )
 
     async def go():
@@ -255,16 +274,14 @@ def test_renderer_strips_options_from_the_reply(tmp_path):
         await r.on_done()
 
     asyncio.run(go())
-    assert client.sent[0]["text"] == "answer"
+    assert client.sent[0]["text"] == "answer\n\n1. a\n2. b"
 
 
 def test_renderer_echoes_the_stored_context_token(tmp_path):
     client = FakeClient()
     store = ContextTokenStore(str(tmp_path))
     store.set("acct1", "userA", "ctx-42")
-    r = WeixinRenderer(
-        client, "userA", WEIXIN_CAPABILITIES, ctx_store=store, account_id="acct1"
-    )
+    r = WeixinRenderer(client, "userA", WEIXIN_CAPABILITIES, ctx_store=store, account_id="acct1")
 
     async def go():
         await r.on_text_chunk("hi")
@@ -277,8 +294,11 @@ def test_renderer_echoes_the_stored_context_token(tmp_path):
 def test_renderer_chunks_an_oversized_answer(tmp_path):
     client = FakeClient()
     r = WeixinRenderer(
-        client, "userA", WEIXIN_CAPABILITIES,
-        ctx_store=ContextTokenStore(str(tmp_path)), account_id="acct1",
+        client,
+        "userA",
+        WEIXIN_CAPABILITIES,
+        ctx_store=ContextTokenStore(str(tmp_path)),
+        account_id="acct1",
     )
 
     async def go():
@@ -293,8 +313,11 @@ def test_renderer_chunks_an_oversized_answer(tmp_path):
 def test_renderer_tool_and_thinking_events_emit_nothing(tmp_path):
     client = FakeClient()
     r = WeixinRenderer(
-        client, "userA", WEIXIN_CAPABILITIES,
-        ctx_store=ContextTokenStore(str(tmp_path)), account_id="acct1",
+        client,
+        "userA",
+        WEIXIN_CAPABILITIES,
+        ctx_store=ContextTokenStore(str(tmp_path)),
+        account_id="acct1",
     )
 
     async def go():
@@ -767,3 +790,149 @@ def test_tool_gate_denies_when_hooks_deny(tmp_path):
     gate = captured.get("tool_gate")
     assert gate is not None
     assert gate(FakeEvent("permission")) == "deny"
+
+
+# ── command vocabulary ────────────────────────────────────────────────────────
+def test_every_alias_in_the_weixin_spec_is_reachable():
+    """A command that parses but is missing from help is a feature nobody finds;
+    one listed but unreachable is a lie. Both derive from COMMAND_SPEC."""
+    from kiro_crew.weixin.commands import COMMAND_SPEC
+
+    for spec in COMMAND_SPEC:
+        assert parse_command(f"/{spec.name}") == spec.name
+        for alias in spec.aliases:
+            assert parse_command(alias) == spec.name, f"{alias} unreachable"
+
+
+def test_every_visible_weixin_command_appears_in_help():
+    from kiro_crew.weixin.commands import COMMAND_SPEC, build_help
+
+    body = build_help()
+    for spec in COMMAND_SPEC:
+        assert f"/{spec.name}" in body
+        for alias in spec.aliases:
+            assert alias in body
+
+
+def test_weixin_help_lists_no_link_command():
+    """iLink is DM-only with no dashboard-mirror command, so advertising one
+    would promise a capability this channel does not have."""
+    from kiro_crew.weixin.commands import build_help
+
+    assert "/link" not in build_help()
+
+
+def test_help_replies_with_the_card_and_runs_no_turn(tmp_path):
+    provider = FakeProvider()
+    d, client, sessions = _make(tmp_path, provider=provider)
+
+    asyncio.run(d.handle_message(_msg("/help")))
+
+    assert provider.prompts == [], "help must not spend a turn"
+    assert any("/stop" in m["text"] for m in client.sent)
+
+
+def test_stop_cancels_a_live_turn_cooperatively(tmp_path):
+    provider = FakeProvider()
+    d, client, sessions = _make(tmp_path, provider=provider, busy=True)
+
+    asyncio.run(d.handle_message(_msg("/stop")))
+
+    # Fire-and-forget: waiting for the ack would hold the reply behind the very
+    # turn being stopped.
+    assert provider.cancelled == [0]
+    assert any("正在停止" in m["text"] for m in client.sent)
+
+
+def test_stop_with_nothing_running_says_so(tmp_path):
+    provider = FakeProvider()
+    d, client, sessions = _make(tmp_path, provider=provider, busy=False)
+
+    asyncio.run(d.handle_message(_msg("/stop")))
+
+    assert provider.cancelled == []
+    assert any("没有正在生成" in m["text"] for m in client.sent)
+
+
+def test_stop_never_releases_a_semaphore_it_did_not_acquire(tmp_path):
+    provider = FakeProvider()
+    d, client, sessions = _make(tmp_path, provider=provider, busy=True)
+
+    asyncio.run(d.handle_message(_msg("/stop")))
+
+    assert sessions.released == 0, "drive_turn's finally owns the release"
+
+
+# ── origin-mirror binding (shared, in drive_turn) ──────────────────────────────
+def test_a_turn_binds_the_conversation_as_its_own_mirror(tmp_path):
+    """A channel conversation IS its own mirror.
+
+    Without the binding, a cron result, a subagent reply or a dashboard turn on
+    this session reaches nobody: the resolver finds no link and the chat sits
+    there looking dead while the conversation continues elsewhere.
+    """
+    from kiro_crew.messaging.link import ChannelLink
+
+    d, client, sessions = _make(tmp_path, provider=FakeProvider())
+    asyncio.run(d.handle_message(_msg("hi", "userA")))
+
+    assert list(sessions.mirror_links.values()) == [
+        ChannelLink(channel_type="weixin", channel_id="userA", thread_id=None)
+    ]
+
+
+def test_the_bind_is_re_asserted_on_every_turn(tmp_path):
+    # A restart-cold session or an unlink elsewhere REMOVES the binding, so only a
+    # self-healing bind cannot leave a live conversation silently unmirrored.
+    d, client, sessions = _make(tmp_path, provider=FakeProvider())
+    asyncio.run(d.handle_message(_msg("one", "userA")))
+    sessions.mirror_links.clear()
+    asyncio.run(d.handle_message(_msg("two", "userA")))
+    assert len(sessions.mirror_links) == 1
+
+
+def test_an_opted_out_conversation_is_not_re_bound(tmp_path):
+    # Otherwise "off" would last exactly until the user's next message.
+    d, client, sessions = _make(tmp_path, provider=FakeProvider())
+    sessions.opted_out = True
+    asyncio.run(d.handle_message(_msg("hi", "userA")))
+    assert sessions.mirror_links == {}
+
+
+def test_an_existing_binding_is_never_repointed(tmp_path):
+    # The dashboard can aim a session's mirror at any surface; overwriting it
+    # would silently redirect the user's replies into this chat.
+    from kiro_crew.messaging.link import ChannelLink
+
+    d, client, sessions = _make(tmp_path, provider=FakeProvider())
+    elsewhere = ChannelLink(channel_type="discord", channel_id="99", thread_id=None)
+    key = d._session_key("userA")
+    sessions.mirror_links[key] = elsewhere
+    asyncio.run(d.handle_message(_msg("hi", "userA")))
+    assert sessions.mirror_links[key] == elsewhere
+
+
+def test_a_failing_bind_costs_the_mirror_not_the_answer(tmp_path):
+    # Binding is bookkeeping; the turn is the product.
+    class Broken(FakeSessions):
+        def mirror_opt_out(self, key):
+            raise RuntimeError("store unreadable")
+
+    provider = FakeProvider()
+    client = FakeClient()
+    sessions = Broken(provider=provider)
+    d = WeixinDispatcher(
+        sessions=sessions,
+        ctx_builder=FakeCtxBuilder(),
+        cfg=FakeCfg(),
+        account_id="acct1",
+        ctx_store=ContextTokenStore(str(tmp_path)),
+        typing_cache=TypingTicketCache(),
+        approval_mode=APPROVAL_AUTO,
+    )
+    d.client = client
+
+    asyncio.run(d.handle_message(_msg("hi", "userA")))
+
+    assert [s["text"] for s in client.sent] == ["hello from the agent"]
+    assert sessions.successes == 1

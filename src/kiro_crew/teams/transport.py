@@ -16,7 +16,8 @@ Teams is DM-only and fail-closed:
   audited BEFORE authorization.
 * No streaming: the renderer posts a typing indicator and delivers the final
   answer in one shot (``streaming=False``); ``max_buttons=0`` so the renderer
-  drops ``[OPTIONS:]`` trailers rather than emitting unsupported buttons.
+  renders an ``[OPTIONS:]`` trailer as a numbered text list rather than
+  emitting unsupported buttons.
 """
 
 from __future__ import annotations
@@ -38,9 +39,9 @@ logger = logging.getLogger(__name__)
 DispatchFn = Callable[[TeamsInbound], Awaitable[None]]
 
 # Teams capabilities: no token streaming, no in-place edit (MVP), no tappable
-# chips (max_buttons=0 records the fact; the renderer's [OPTIONS:] drop is
-# unconditional and does not read it), proactive send is fine for a
-# conversation we've already seen a service_url for.
+# chips (max_buttons=0, so the renderer routes [OPTIONS:] through the shared
+# numbered-text fallback), proactive send is fine for a conversation we've
+# already seen a service_url for.
 TEAMS_CAPABILITIES = TransportCapabilities(
     streaming=False,
     edit=False,
