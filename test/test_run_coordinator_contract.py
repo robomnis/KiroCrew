@@ -509,6 +509,9 @@ async def test_command_claim_returns_fence_and_advances_legal_transitions(
     assert starting.decision is CoordinatorDecision.APPLIED
     assert starting.value is not None
     assert starting.value.observed_state is ObservedState.STARTING
+    receipt = await coordinator.get_command_by_key("key-1")
+    assert receipt is not None
+    assert receipt.command.status is CommandStatus.CLAIMED
 
     running = await coordinator.mark_running(
         "run-1", claim.fence, expected_version=starting.value.version

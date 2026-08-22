@@ -28,7 +28,7 @@ from .run_coordinator.models import (
 )
 
 _CONTROL_LEASE_SECS = 30.0
-_EXECUTION_LEASE_SECS = 90.0
+EXECUTION_LEASE_SECONDS = 90.0
 
 
 @dataclass(frozen=True)
@@ -384,10 +384,15 @@ class SubagentCommandAuthority:
             )
             if claim is None:
                 raise AuthorityUnavailable("command outcome is still pending")
+            if claim.fence is None or claim.run is None:
+                raise AuthorityUnavailable("execution claim omitted its run fence")
             call_kwargs = {
                 **kwargs,
                 "_preassigned_id": receipt.run.run_id,
                 "_coordinator_admitted": True,
+                "_coordinator_command": claim.command,
+                "_coordinator_fence": claim.fence,
+                "_coordinator_version": claim.run.version,
             }
             try:
                 if operation is CommandOperation.CONTINUE:
@@ -588,14 +593,14 @@ class SubagentCommandAuthority:
             return
 
         async def renew() -> None:
-            cadence = _EXECUTION_LEASE_SECS / 3
+            cadence = EXECUTION_LEASE_SECONDS / 3
             while True:
                 await self._sleep(cadence)
                 try:
                     renewed = await self._coordinator.renew(
                         run_id,
                         fence,
-                        self._clock() + _EXECUTION_LEASE_SECS,
+                        self._clock() + EXECUTION_LEASE_SECONDS,
                     )
                 except Exception:
                     continue
@@ -658,7 +663,7 @@ class SubagentCommandAuthority:
         return OwnerLease(
             owner_id=self._owner_id,
             lease_expires_at=self._clock()
-            + (_EXECUTION_LEASE_SECS if execution else _CONTROL_LEASE_SECS),
+            + (EXECUTION_LEASE_SECONDS if execution else _CONTROL_LEASE_SECS),
         )
 
     @staticmethod

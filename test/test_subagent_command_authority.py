@@ -182,17 +182,16 @@ async def test_keyed_spawn_replay_invokes_sync_manager_once() -> None:
     )
 
     assert replay is first
-    assert manager.spawn_calls == [
-        (
-            "inspect the tree",
-            {
-                "parent_session_key": "dashboard:one",
-                "agent": "reviewer",
-                "_preassigned_id": "run-spawn",
-                "_coordinator_admitted": True,
-            },
-        )
-    ]
+    assert len(manager.spawn_calls) == 1
+    called_task, called_kwargs = manager.spawn_calls[0]
+    assert called_task == "inspect the tree"
+    assert called_kwargs["parent_session_key"] == "dashboard:one"
+    assert called_kwargs["agent"] == "reviewer"
+    assert called_kwargs["_preassigned_id"] == "run-spawn"
+    assert called_kwargs["_coordinator_admitted"] is True
+    assert called_kwargs["_coordinator_command"].command_id == "command-spawn"
+    assert called_kwargs["_coordinator_fence"].run_id == "run-spawn"
+    assert called_kwargs["_coordinator_version"] == 1
 
 
 @pytest.mark.asyncio
@@ -461,17 +460,16 @@ async def test_keyed_continuation_replay_preserves_conversation_and_run_identity
     )
 
     assert replay is first
-    assert manager.continue_calls == [
-        (
-            "conversation-one",
-            "follow up",
-            {
-                "parent_session_key": "dashboard:one",
-                "_preassigned_id": "run-continue",
-                "_coordinator_admitted": True,
-            },
-        )
-    ]
+    assert len(manager.continue_calls) == 1
+    conversation, called_task, called_kwargs = manager.continue_calls[0]
+    assert conversation == "conversation-one"
+    assert called_task == "follow up"
+    assert called_kwargs["parent_session_key"] == "dashboard:one"
+    assert called_kwargs["_preassigned_id"] == "run-continue"
+    assert called_kwargs["_coordinator_admitted"] is True
+    assert called_kwargs["_coordinator_command"].command_id == "command-continue"
+    assert called_kwargs["_coordinator_fence"].run_id == "run-continue"
+    assert called_kwargs["_coordinator_version"] == 1
 
 
 @pytest.mark.asyncio

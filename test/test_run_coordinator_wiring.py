@@ -224,14 +224,17 @@ async def test_authoritatively_admitted_run_does_not_submit_twice() -> None:
 
 
 @pytest.mark.asyncio
-async def test_queued_cancel_stops_the_authority_lease() -> None:
+async def test_queued_cancel_keeps_authority_lease_until_terminal_commit() -> None:
     manager = SubagentManager(sessions=MagicMock(), ctx_builder=MagicMock())
-    manager._unqueue = MagicMock(return_value=True)
+    queued = {"_preassigned_id": "queued-run"}
+    manager._unqueue = MagicMock(return_value=[queued])
+    manager._finalize_queued_cancel = AsyncMock()
     manager.command_authority.stop_execution_heartbeat = AsyncMock()
 
     assert await manager.cancel("queued-run") is True
 
-    manager.command_authority.stop_execution_heartbeat.assert_awaited_once_with("queued-run")
+    manager.command_authority.stop_execution_heartbeat.assert_not_awaited()
+    manager._finalize_queued_cancel.assert_awaited_once_with(queued)
 
 
 @pytest.mark.asyncio

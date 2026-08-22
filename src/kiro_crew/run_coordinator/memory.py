@@ -465,11 +465,6 @@ class MemoryRunCoordinator:
                 updated_at=self._clock(),
             )
             self._runs[updated.run_id] = updated
-            self._commands[stored.command_id] = replace(
-                stored,
-                status=CommandStatus.APPLIED,
-                updated_at=self._clock(),
-            )
             return self._result(
                 CoordinatorDecision.APPLIED, CoordinatorReason.TRANSITIONED, updated
             )
@@ -601,7 +596,13 @@ class MemoryRunCoordinator:
                     )
             return True
 
-    async def claim_outbox(self, owner: OwnerLease, limit: int) -> list[OutboxEvent]:
+    async def claim_outbox(
+        self,
+        owner: OwnerLease,
+        limit: int,
+        event_id: str = "",
+        acknowledgement: bool = False,
+    ) -> list[OutboxEvent]:
         if limit <= 0:
             return []
         async with self._lock:
@@ -614,7 +615,11 @@ class MemoryRunCoordinator:
             ):
                 if len(claimed) >= limit:
                     break
-                pending = current.status is DeliveryState.PENDING and current.available_at <= now
+                if event_id and current.event_id != event_id:
+                    continue
+                pending = current.status is DeliveryState.PENDING and (
+                    (acknowledgement and bool(event_id)) or current.available_at <= now
+                )
                 expired = (
                     current.status is DeliveryState.CLAIMED and current.claim_expires_at <= now
                 )

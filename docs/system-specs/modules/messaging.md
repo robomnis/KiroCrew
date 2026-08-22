@@ -522,6 +522,14 @@ Full new-path dispatch: fires the ack reaction + working status immediately (con
 
 ## Invariants
 
+- **Sub-agent completion acceptance is coordinator-backed**: keyed sub-agent
+  runs commit terminal state and one stable outbox event before the gateway
+  invokes dashboard/channel routing. Direct acceptance is acknowledged through
+  a delivery fence. A completion parked in a busy dashboard slot remains
+  pending until its turn consumes it; batch-held sibling events remain pending
+  until their digest is accepted. Retries reuse `event_id` and never resubmit
+  execution.
+
 - **One-way dependency**: `kiro_crew.messaging` never imports `kiro_crew.slack` / `kiro_crew.dashboard`; violations reintroduce the cycle the abstraction removed.
 - **Deny-by-default authorization**: `MessagingTransport.authorize` implementations authorize nobody when unconfigured; interactive approval denies unless positively approved (or a timeout elapses → deny).
 - **Redaction is unconditional**: all LLM/tool-originated text flowing through `TurnDriver` passes `redact_exfiltration_urls()` + `redact_credentials()` before reaching any renderer.
