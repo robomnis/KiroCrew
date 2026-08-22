@@ -3086,13 +3086,13 @@ async def _retire_slot_nudge_loop(name: str) -> "NudgeLoop | None":
       timer through ``notify_turn_complete``. Disarming without removing is
       therefore not enough: the clock comes straight back mid-close.
 
-    ``remove()`` is what makes this atomic: its uncontended lock acquire does not
-    yield, so the loop leaves the registry and its timer is cancelled before the
-    coroutine can suspend, and ``notify_turn_complete`` then finds nothing to
-    re-arm.
+    Legacy loops are removed. Structured monitors instead retain their durable
+    outcome and clear their timer before the coroutine can suspend, so a closed
+    session cannot be revived by a late wake while its terminal history remains
+    inspectable.
 
-    The returned loop is the only remaining record of it — the persist-failure
-    path uses it to put the clock back (see :func:`_restore_slot_nudge_loop`).
+    The returned loop lets the persist-failure path put the clock back (see
+    :func:`_restore_slot_nudge_loop`).
 
     A removal that FAILS raises :exc:`_NudgeRetireFailed` rather than logging and
     carrying on. ``remove()`` drops the loop from memory first and only then
@@ -3122,7 +3122,10 @@ async def _retire_slot_nudge_loop(name: str) -> "NudgeLoop | None":
         logger.warning("autonudge loop lookup on slot close failed", exc_info=True)
         return None
     try:
-        await svc.remove(loop.id)
+        if getattr(loop, "monitor", None) is not None:
+            await svc.retire_monitor_for_session_close(loop.id)
+        else:
+            await svc.remove(loop.id)
     except Exception as exc:
         logger.warning("autonudge loop removal on slot close failed", exc_info=True)
         raise _NudgeRetireFailed(loop) from exc
@@ -3144,6 +3147,26 @@ async def _restore_slot_nudge_loop(loop: "NudgeLoop | None") -> None:
     — reviving that would override an explicit stop.
     """
     if loop is None or not loop.active:
+        monitor = None if loop is None else getattr(loop, "monitor", None)
+        if (
+            loop is not None
+            and monitor is not None
+            and monitor.outcome is not None
+            and monitor.outcome.value == "session_close"
+        ):
+            try:
+                from kiro_crew.autonudge import (
+                    get_instance as _autonudge_get,  # circular: autonudge -> dashboard
+                )
+
+                svc = _autonudge_get()
+                if svc is not None:
+                    await svc.restore_monitor_after_failed_session_close(loop.id)
+            except Exception:
+                logger.warning(
+                    "structured monitor restore after failed slot close failed",
+                    exc_info=True,
+                )
         return
     try:
         from kiro_crew import autonudge  # circular: autonudge -> dashboard.chat -> chat_handlers
