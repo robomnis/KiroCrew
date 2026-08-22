@@ -17,6 +17,7 @@ every existing patch site.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import uuid
@@ -49,6 +50,57 @@ from kiro_crew.validation import (
 # a tool description is always-on context in every session, so this buys
 # self-correction for a few dozen characters, not a full agent listing.
 _MAX_ROSTER_NAMES = 8
+_COORDINATOR_UNCERTAIN_CODES = frozenset(
+    {"coordinator_outcome_uncertain", "coordinator_unavailable"}
+)
+
+
+def _with_command_identity(
+    operation: str,
+    body: dict[str, Any],
+    *,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Attach one stable command identity and canonical payload hash to *body*.
+
+    These values are generated before the HTTP call so a transport-layer retry
+    carries the exact admission identity the coordinator already recorded.
+    """
+    identified = dict(body)
+    if run_id:
+        identified["run_id"] = run_id
+    payload = {"operation": operation, **identified}
+    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    identified["command_id"] = uuid.uuid4().hex
+    identified["idempotency_key"] = uuid.uuid4().hex
+    identified["payload_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return identified
+
+
+def _resolve_uncertain_submission(response: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+    """Resolve a lost response from the command record, without re-posting it.
+
+    The PR 5 endpoint returns ``found: true`` with the original admission
+    response when it has a record.  A missing command or lookup failure leaves
+    the original transport uncertainty intact.
+    """
+    if (
+        not response.get("transport_error")
+        and response.get("code") not in _COORDINATOR_UNCERTAIN_CODES
+    ):
+        return response
+    try:
+        recorded = mcp_core._get(f"/api/spawn/commands/{idempotency_key}")
+    except Exception:
+        return response
+    if recorded.get("found") is not True:
+        return response
+    if recorded.get("code") == "command_pending":
+        # The durable row proves admission, not whether the local manager
+        # effect has happened. Preserve transport uncertainty so batch wave
+        # accounting cannot reconcile this still-live member as rejected.
+        return {**recorded, "transport_error": True}
+    return recorded
 
 
 def _agent_roster_hint() -> str:
@@ -513,7 +565,9 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
     inc_lessons = args.get("include_lessons", True) is not False
     inc_project = args.get("include_project", True) is not False
     if agents_list and len(agents_list) != len(task_list):
-        return f"Error: agents length ({len(agents_list)}) must match tasks length ({len(task_list)})"
+        return (
+            f"Error: agents length ({len(agents_list)}) must match tasks length ({len(task_list)})"
+        )
 
     agent_ids: list[str] = []
     agent_names: list[str] = []
@@ -595,7 +649,10 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
             body["include_project"] = False
         if approval_mode:
             body["approval_mode"] = approval_mode
-        d = mcp_core._post("/api/spawn", body)
+        body = _with_command_identity("spawn", body, run_id=uuid.uuid4().hex[:8])
+        d = _resolve_uncertain_submission(
+            mcp_core._post("/api/spawn", body), body["idempotency_key"]
+        )
         if d.get("error"):
             error_line = f"{t[:60]}: {d['error']}"
             if d.get("transport_error"):
@@ -694,8 +751,7 @@ def spawn_run(name: str, args: dict[str, Any]) -> str:
             )
         else:
             spawn_lines.append(
-                f"Error: acceptance status is unknown for "
-                f"{len(transport_errors)} task(s):"
+                f"Error: acceptance status is unknown for " f"{len(transport_errors)} task(s):"
             )
         for e in transport_errors:
             spawn_lines.append(f"  - {e}")
@@ -742,7 +798,10 @@ def spawn_continue(name: str, args: dict[str, Any]) -> str:
         body["model"] = args["model"]
     if args.get("max_turns"):
         body["max_turns"] = args["max_turns"]
-    d = mcp_core._post(f"/api/spawn/{conv}/continue", body)
+    body = _with_command_identity("continue", body, run_id=uuid.uuid4().hex[:8])
+    d = _resolve_uncertain_submission(
+        mcp_core._post(f"/api/spawn/{conv}/continue", body), body["idempotency_key"]
+    )
     if d.get("error"):
         return f"Error: {d['error']}"
     return (
@@ -759,7 +818,10 @@ def spawn_steer(name: str, args: dict[str, Any]) -> str:
     mode = (args.get("mode") or "interrupt").strip()
     if not agent_id or not message:
         return "Error: agent_id and message are required"
-    d = mcp_core._post(f"/api/spawn/{agent_id}/steer", {"message": message, "mode": mode})
+    body = _with_command_identity("steer", {"message": message, "mode": mode})
+    d = _resolve_uncertain_submission(
+        mcp_core._post(f"/api/spawn/{agent_id}/steer", body), body["idempotency_key"]
+    )
     if d.get("error"):
         return f"Error: {d['error']}"
     if mode == "follow_up":
@@ -780,7 +842,10 @@ def spawn_release(name: str, args: dict[str, Any]) -> str:
     conv = (args.get("conversation") or "").strip()
     if not conv:
         return "Error: conversation is required"
-    d = mcp_core._post(f"/api/spawn/{conv}/release", {})
+    body = _with_command_identity("release", {})
+    d = _resolve_uncertain_submission(
+        mcp_core._post(f"/api/spawn/{conv}/release", body), body["idempotency_key"]
+    )
     if d.get("error"):
         return f"Error: {d['error']}"
     return f"Released conversation {conv} — it can no longer be continued."
@@ -813,9 +878,7 @@ def spawn_list(name: str, args: dict[str, Any]) -> str:
                 progress = f" ({', '.join(parts)})"
             _withheld = a.get("context_withheld") or []
             scope = f"  ctx-withheld: {','.join(_withheld)}" if _withheld else ""
-            lines.append(
-                f"{a['id']}  [{status}]{err}{progress}{scope}  {_redact(a['task'])[:60]}"
-            )
+            lines.append(f"{a['id']}  [{status}]{err}{progress}{scope}  {_redact(a['task'])[:60]}")
     # Always append available agents (fresh read from disk). Same grammar filter as
     # the two rosters above: this output is a tool RESULT, so it lands in the same
     # model context, and a spec's ``name`` field arrives unvalidated.

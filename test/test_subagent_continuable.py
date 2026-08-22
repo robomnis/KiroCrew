@@ -184,8 +184,11 @@ class TestContinueConversation:
         live = SubagentInfo(id="orig1234", task="t")
         manager._agents["orig1234"] = live  # not done → busy
         with patch("kiro_crew.subagent.sel"):
-            info = manager.continue_conversation("orig1234", "more work")
+            info = manager.continue_conversation(
+                "orig1234", "more work", _preassigned_id="admitted1"
+            )
         assert info is not None and info.done
+        assert info.id == "admitted1"
         assert info.error.startswith("conversation_busy")
 
     def test_gone_conversation_refused(self) -> None:
@@ -194,8 +197,11 @@ class TestContinueConversation:
         manager = _manager(sessions)
         with patch("kiro_crew.subagent.sel"), \
                 patch("kiro_crew.subagent.read_state", return_value=None):
-            info = manager.continue_conversation("deadbeef", "more work")
+            info = manager.continue_conversation(
+                "deadbeef", "more work", _preassigned_id="admitted2"
+            )
         assert info is not None and info.done
+        assert info.id == "admitted2"
         assert info.error.startswith("conversation_gone")
 
     @pytest.mark.asyncio

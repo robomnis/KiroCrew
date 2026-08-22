@@ -124,6 +124,20 @@ def _info(**kw: Any) -> Any:
     return SimpleNamespace(**base)
 
 
+def test_post_effect_authority_failure_preserves_transport_uncertainty() -> None:
+    response = mod._authority_failure_response(
+        mod.AuthorityOutcomeUncertain("execution result was not durably finished")
+    )
+
+    assert response.status == 503
+    assert _payload(response) == {
+        "error": "execution result was not durably finished",
+        "code": "coordinator_outcome_uncertain",
+        "transport_error": True,
+        "counted": True,
+    }
+
+
 def _mgr(**kw: Any) -> Any:
     mgr = MagicMock()
     mgr.max_concurrent = 4

@@ -588,6 +588,10 @@ class TestSpawnLifecycleTools:
         assert body["agent"] == "kirocrew"
         assert body["model"] == "claude-opus-5"
         assert body["max_turns"] == 3
+        assert len(body["run_id"]) == 8
+        assert len(body["command_id"]) == 32
+        assert len(body["idempotency_key"]) == 32
+        assert len(body["payload_hash"]) == 64
         assert "run9" in out and "END YOUR TURN" in out
 
     def test_continue_propagates_backend_error(self):
@@ -601,7 +605,12 @@ class TestSpawnLifecycleTools:
         assert m.call_args[0][0] == "/api/spawn/a1/steer"
         # mode defaults to "interrupt" (spawn_steer's original semantics);
         # "follow_up" queues for delivery after the run's turn completes.
-        assert m.call_args[0][1] == {"message": "stop that", "mode": "interrupt"}
+        body = m.call_args[0][1]
+        assert body["message"] == "stop that"
+        assert body["mode"] == "interrupt"
+        assert len(body["command_id"]) == 32
+        assert len(body["idempotency_key"]) == 32
+        assert len(body["payload_hash"]) == 64
         assert "Steered run a1" in out
 
     def test_steer_propagates_backend_error(self):
@@ -613,6 +622,10 @@ class TestSpawnLifecycleTools:
         with patch.object(mcp_core, "_post", return_value={"ok": True}) as m:
             out = _call_tool("spawn_release", {"conversation": "conv1"})
         assert m.call_args[0][0] == "/api/spawn/conv1/release"
+        body = m.call_args[0][1]
+        assert len(body["command_id"]) == 32
+        assert len(body["idempotency_key"]) == 32
+        assert len(body["payload_hash"]) == 64
         assert "no longer be continued" in out
 
         with patch.object(mcp_core, "_post", return_value={"error": "not_found"}):

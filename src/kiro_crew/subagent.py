@@ -84,9 +84,7 @@ from kiro_crew.resource_status import cached_admission_check
 from kiro_crew.run_coordinator import (
     CommandOperation,
     CoordinatorDecision,
-    MemoryRunCoordinator,
     RunCoordinator,
-    ShadowRunCoordinator,
     SQLiteRunCoordinator,
     SubmitRun,
 )
@@ -97,6 +95,7 @@ from kiro_crew.session_surface import has_dashboard_surface
 from kiro_crew.session_workspace import result_path as _ws_result_path
 from kiro_crew.slack.format import extract_options
 from kiro_crew.stats import Stats
+from kiro_crew.subagent_command_authority import SubagentCommandAuthority
 from kiro_crew.subagent_completion_meta import (
     OUTCOME_FAILED,
     OUTCOME_INTERRUPTED,
@@ -1202,6 +1201,13 @@ class SubagentInfo:
     streaming_text: str = ""
     elapsed: float = 0.0
     _raw_task: str = ""  # unredacted task for kiro-cli execution prompt
+    # True when the async command authority durably admitted this run before
+    # invoking the legacy executor. The executor must not create a second
+    # shadow command with a different identity at _run entry.
+    _coordinator_admitted: bool = False
+    # True while a keyed run is queued or awaiting approval. The command
+    # authority owns its pre-execution lease until `_run` takes over.
+    _coordinator_waiting: bool = False
     # CC-specific overrides (ignored for ACP)
     model: str = ""
     # Per-call reasoning-effort override (spawn_run ``reasoning_effort``).
@@ -1411,13 +1417,11 @@ class SubagentManager:
         self._shutting_down = False
         self._completion_keep = completion_keep
         self._completion_keep_chars = completion_keep_chars
-        # This seam is deliberately pre-authority: spawn is synchronous while
-        # coordinator mutation is async. The accepted run is mirrored only at
-        # async _run entry, after the legacy admission/approval path has won.
-        self._coordinator = coordinator or ShadowRunCoordinator(
-            MemoryRunCoordinator(),
-            SQLiteRunCoordinator(),
-        )
+        # Keyed async callers durably admit commands through this coordinator
+        # before invoking the compatibility executor. Legacy synchronous
+        # callers are still mirrored at async _run entry during migration.
+        self._coordinator = coordinator or SQLiteRunCoordinator()
+        self.command_authority = SubagentCommandAuthority(self._coordinator, self)
         self._lifecycle: SubagentLifecycle[SubagentInfo] = SubagentLifecycle()
         # follow_up watchers (spawn_steer mode="follow_up"), keyed by run id.
         # Manager-OWNED on purpose: these tasks can spawn a brand-new run
@@ -3093,6 +3097,7 @@ class SubagentManager:
         _agent_prevalidated: bool = False,
         _from_queue: bool = False,
         _preassigned_id: str = "",
+        _coordinator_admitted: bool = False,
     ) -> SubagentInfo | None:
         """Spawn a subagent for *task*.
 
@@ -3398,6 +3403,7 @@ class SubagentManager:
                     "include_project": include_project,
                     "_agent_prevalidated": _agent_prevalidated,
                     "_preassigned_id": agent_id,
+                    "_coordinator_admitted": _coordinator_admitted,
                 }
             )
             logger.info(
@@ -3430,6 +3436,8 @@ class SubagentManager:
                 include_memory=include_memory,
                 include_lessons=include_lessons,
                 include_project=include_project,
+                _coordinator_admitted=_coordinator_admitted,
+                _coordinator_waiting=_coordinator_admitted,
             )
             return info
 
@@ -3483,6 +3491,7 @@ class SubagentManager:
             include_project=include_project,
         )
         info._raw_task = task  # unredacted prompt for kiro-cli execution
+        info._coordinator_admitted = _coordinator_admitted
         self._agents[agent_id] = info
         self._scheduler.occupy(info, time.monotonic())
         # Batch lifecycle: announce the wave ONCE, on its first member to
@@ -3542,6 +3551,7 @@ class SubagentManager:
                     metadata={"subagent_id": agent_id, "reason": "tool_calls_gated"},
                 )
             elif self._on_spawn_approval:
+                info._coordinator_waiting = info._coordinator_admitted
                 self._tasks[agent_id] = asyncio.create_task(self._spawn_with_approval(info))
             else:
                 info.done = True
@@ -3563,6 +3573,7 @@ class SubagentManager:
                 # sibling digest strands forever.
                 return self._announce_rejection(info)
         elif self._on_spawn_approval:
+            info._coordinator_waiting = info._coordinator_admitted
             self._tasks[agent_id] = asyncio.create_task(self._spawn_with_approval(info))
         else:
             info.done = True
@@ -3785,6 +3796,7 @@ class SubagentManager:
         max_turns: int = 0,
         cwd: str = "",
         _preassigned_id: str = "",
+        _coordinator_admitted: bool = False,
     ) -> SubagentInfo | None:
         """Dispatch a follow-up *task* into conversation *conv_id*.
 
@@ -3813,7 +3825,7 @@ class SubagentManager:
         busy = self._conversation_busy(conv_key)
         if busy is not None:
             info = SubagentInfo(
-                id=uuid.uuid4().hex[:8],
+                id=_preassigned_id or uuid.uuid4().hex[:8],
                 task=_redact(task),
                 done=True,
                 parent_session_key=parent_session_key,
@@ -3850,7 +3862,7 @@ class SubagentManager:
             except Exception:
                 pass
             info = SubagentInfo(
-                id=uuid.uuid4().hex[:8],
+                id=_preassigned_id or uuid.uuid4().hex[:8],
                 task=_redact(task),
                 done=True,
                 parent_session_key=parent_session_key,
@@ -3884,6 +3896,7 @@ class SubagentManager:
         return self.spawn(
             task,
             _preassigned_id=_preassigned_id,
+            _coordinator_admitted=_coordinator_admitted,
             parent_session_key=parent_session_key,
             agent=agent,
             model=model,
@@ -4431,6 +4444,7 @@ class SubagentManager:
             approved = False
 
         if not approved:
+            await self.command_authority.stop_execution_heartbeat(info.id)
             info.done = True
             info.error = "spawn rejected"
             # Slot accounting through the one-shot token, NOT a bare decrement.
@@ -4986,7 +5000,11 @@ class SubagentManager:
         """Execute a subagent task in its own session."""
         session_key = info.conversation_key or f"subagent:{info.id}"
         try:
-            await self._shadow_submit_accepted_run(info)
+            if info._coordinator_admitted:
+                info._coordinator_waiting = False
+                await self.command_authority.execution_started(info.id)
+            else:
+                await self._shadow_submit_accepted_run(info)
             await asyncio.wait_for(
                 self._run_inner(info, session_key), timeout=self._default_timeout
             )
@@ -6406,6 +6424,7 @@ class SubagentManager:
             # ineffective while the work ran anyway, and a purge on a deleted
             # session could not reach it. Unqueueing IS the cancel for that state.
             if self._unqueue(agent_id):
+                await self.command_authority.stop_execution_heartbeat(agent_id)
                 logger.info("Cancelled queued subagent %s before it started", agent_id)
                 return True
             return False
@@ -6549,3 +6568,4 @@ class SubagentManager:
                             owner.id,
                             exc_info=True,
                         )
+        await self.command_authority.close()

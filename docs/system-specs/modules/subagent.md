@@ -8,34 +8,62 @@ Supports `on_tool_approval` callback for interactive tool approval (routed throu
 
 ### Run coordinator seam
 
-`SubagentManager` accepts an optional typed `RunCoordinator` and defaults to a
-primary-preserving shadow adapter: the deterministic in-memory implementation is
-primary and SQLite is shadow. Construction performs no filesystem I/O. This is
-a pre-authority dependency seam: the synchronous spawn path and all terminal
-effects still use the existing manager fields and run-folder persistence. The
-manager does not schedule an async coordinator mutation from `spawn()` because
-doing so would weaken the current durable-before-visible ordering. Coordinator
-authority moves only in a later migration phase.
+`SubagentManager` accepts an optional typed `RunCoordinator` and defaults to the
+durable SQLite implementation. Construction performs no filesystem I/O. It owns
+one process-lifetime `SubagentCommandAuthority`, which durably admits keyed
+HTTP/MCP commands before invoking the existing synchronous manager facade. Old
+internal callers that send no identity retain the compatibility path.
 
-After legacy admission and approval, the async `_run` entry submits the accepted
-run to the shadow seam before execution. The submission contains a stable
-command/idempotency identity and a canonical execution payload; continuations
-are distinguished from new spawns. This observation is capped at one second and
-all failures remain diagnostic, so a locked or unhealthy shadow cannot fail an
-accepted legacy run. Exact retries are idempotent. The returned coordinator view
-is also compared with the accepted `SubagentInfo` at bounded field classes,
-without logging task or payload values. Queue, transition, terminal, and delivery
-authority still belongs exclusively to the legacy path in this phase.
+`spawn_run`, `spawn_continue`, `spawn_steer`, and `spawn_release` generate a
+command ID and idempotency key before HTTP; spawn/continue also preassign the
+visible run ID. The gateway validates all-or-none identity fields, recomputes the
+canonical semantic SHA-256 hash, and fails closed on key/payload conflicts. An
+exact replay returns the stored run/control response without repeating the
+manager effect. Before a stored execution response exists, an exact retry may
+claim and execute a command that is still `PENDING`, because no owner has
+crossed the manager boundary. A `CLAIMED` command remains a typed
+pending/unavailable response rather than risking a repeated side effect. A
+claimed control with no durable result remains explicitly outcome-uncertain
+even after its claim expires; expiry never authorizes steer, follow-up, cancel,
+or release replay because the legacy effect may already have happened. A
+transport-uncertain caller queries the durable command by key. Machine-coded
+coordinator-unavailable and outcome-uncertain HTTP responses take the same
+lookup path even when HTTP error flattening omits the transport marker; the
+legacy lost-wave endpoint remains for unkeyed compatibility callers. The
+authenticated DELETE endpoint accepts the same additive identity for idempotent
+cancellation.
+
+The command fence has its own expiry and monotonic claim epoch. Expiry makes a
+command eligible for takeover; it does not discard a completed side effect's
+matching result unless a newer claimant has actually advanced the epoch.
+Control commands therefore never acquire, renew, or invalidate the live
+executor's run lease.
+Rejected legacy admission is durably reflected as a rejected command and failed
+terminal run. A claimed execution with an uncertain crash is not automatically
+replayed. Accepted keyed runs carry `_coordinator_admitted`, preventing `_run`
+from creating a second shadow command. Legacy synchronous spawns still submit at
+async `_run` entry with bounded, failure-contained behavior during migration.
+Queued and approval-waiting keyed runs retain a bounded pre-execution lease.
+Their commands remain `CLAIMED` until the manager task actually starts, so a
+gateway restart cannot turn volatile queued work into a durable applied result.
+At task start the authority durably applies the command before stopping the
+heartbeat and evicting its facade cache. A queued cancellation, approval
+rejection, or shutdown also stops the heartbeat; later lifecycle work owns any
+execution-time renewal. Exact retries of durably rejected execution commands
+decode and return the stored rejection response before considering conflict
+fallbacks.
+If the local executor accepts a keyed run but storing its command result fails,
+the HTTP response is explicitly transport-uncertain and counted. The MCP caller
+resolves the stable idempotency key and never records the live member as a lost
+submission.
 
 The port defines typed desired/observed state, terminal outcomes, idempotent
 commands, execution leases with fencing epochs, optimistic lifecycle versions,
 and delivery claims with an independent fencing epoch. The in-memory adapter is
-the executable contract oracle for later durable implementations; it is not a
-restart store. During this pre-authority phase it accepts executable `spawn` and
-`continue` submissions; control operations fail closed until their target and
-fencing semantics land. Command records persist both the canonical payload and
-its hash so a claimed command can be reconstructed after restart while
-idempotency conflicts stay cheap to detect.
+the executable contract oracle; it is not a restart store. Command records
+persist the canonical payload, hash, independent claim fence, and bounded
+response JSON. Controls may target runs created before the coordinator, so their
+command row does not require a matching canonical run row.
 
 ### Execution boundaries
 
@@ -56,19 +84,20 @@ Private manager views for the old counter, queue, report-task, and teardown-gate
 fields remain as compatibility adapters. They delegate to these boundaries and
 must not regain independent state.
 
-### SQLite shadow store
+### SQLite coordinator store
 
 `SQLiteRunCoordinator` implements the shared contract with fresh short-lived
 connections and offloads every filesystem/database operation from the event
 loop onto a dedicated two-worker coordinator pool. Lock waits therefore queue
-among coordinator calls and cannot starve asyncio's shared executor after the
-one-second shadow wait ends. Mutations run under `BEGIN IMMEDIATE`; schema v2
-uses `runs`, `commands`,
+among coordinator calls and cannot starve asyncio's shared executor after a
+bounded caller wait ends. Mutations run under `BEGIN IMMEDIATE`; schema v3 uses
+`runs`, `commands`,
 `outbox`, and `metadata`, with WAL, `synchronous=FULL`, foreign keys, a bounded
 busy timeout, and a quick integrity check. Ordered, contiguous migrations are
 applied in that transaction; v2 adds the durable command payload to the v1 base
-schema, and failed upgrades roll back cleanly for idempotent retry. The
-shadow-phase implementation
+schema and v3 adds independent command claims/results while permitting
+pre-cutover control targets. Failed upgrades roll back cleanly for idempotent
+retry. The implementation
 hydrates the typed in-memory state machine from those rows and rewrites the
 typed rows in the same transaction. This deliberately favors one behavioral
 oracle during parity checking; targeted SQL updates replace the full-row rewrite
@@ -83,12 +112,12 @@ never deleted or recreated. Concurrent initialization serializes the WAL-mode
 transition and tolerates only a SQLite sidecar that vanishes during its ACL
 preflight; a surviving sidecar or primary-database ACL failure remains fatal.
 
-`ShadowRunCoordinator` always returns the primary result. It calls the shadow
+`ShadowRunCoordinator` remains available for parity tests and additive rollout.
+It always returns the primary result. It calls the shadow
 only after primary completion, swallows shadow failures, compares normalized
 stable field classes without logging payload values, and never repairs the
-primary. The manager invokes only accepted-run submission in this phase; later
-state transitions and terminal delivery do not call the coordinator until their
-authority migrations land.
+primary. Terminal state and delivery move to coordinator authority in the next
+migration phases.
 
 ## Constants
 
@@ -181,7 +210,9 @@ The `is_yolo()` check in the cascade is live (reads current gateway state),
 providing coverage if YOLO is toggled mid-execution.
 
 ### `cancel_all() -> None`
-Cancels all running subagents, stops the reaper loop, and awaits their cleanup. Handles `CancelledError` gracefully — sessions released, count decremented.
+Cancels all running subagents, stops the reaper loop and command-authority lease
+tasks, and awaits their cleanup. Handles `CancelledError` gracefully — sessions
+released, count decremented.
 
 ### `steer_run(agent_id, message) -> (ok, detail)` / `follow_up_run(agent_id, message) -> (ok, detail)`
 Two delivery modes for `spawn_steer` (REST `POST /api/spawn/{id}/steer`, body `mode`: `"interrupt"` default / `"follow_up"`). `steer_run` injects into the RUNNING turn via the provider's `steer`, with a bounded startup-grace poll for a live run whose session has not registered yet (#1113). `follow_up_run` never interrupts: it queues the message on `SubagentInfo.pending_followups` and arms a one-per-run watcher (`_deliver_followups`, registered in the manager-owned `_followup_watchers` dict — NOT the global `_safe_fire` set — because a watcher can spawn a brand-new run and must therefore be reachable by `cancel_all()`, per the same containment contract as `_schedule_cancel_recovery`; `cancel_all` cancels watchers BEFORE the run tasks so none can dispatch into a shutting-down gateway, and the watcher re-checks `_shutting_down` before dispatch). The watcher waits for the run to complete (`info.done` AND its task popped from `_tasks`, so teardown is finished), then dispatches the whole queue as ONE `continue_conversation` on the run's own conversation (messages joined in arrival order — three corrections cost one continuation, not three). The continuation is a normal new run on the same parent session, so its result arrives as a separate completion event. OUTCOME-AWARE: a run the user explicitly STOPPED (`user_stopped`) suppresses dispatch (`followup_suppressed` audit) — resurrecting killed work is the opposite of "the correction can wait"; error/timeout terminals still dispatch (the continuation carries the conversation's context, so "fix what broke" is legitimate). NEVER SILENT: every undeliverable path (suppressed, watcher expiry, dispatch failure) announces a SYNTHETIC failure completion event through the normal `_on_done` path, because the spawn_steer reply promised the parent an event — `followup_expired`/`followup_failed`/`followup_suppressed` SEL audits alone would leave the parent blocked on an event that never comes. Deliberately a per-run poller, NOT a hook in `_run`'s 3-guard finalization: completion is reached from many terminal paths (normal/error/timeout/cancel-recovery/reaper) and a watcher observes the outcome without adding an obligation to any of them. Bounded everywhere: poll cadence 2s, hard deadline `default_timeout + 300s`, and residual `conversation_busy` after done gets a bounded retry. Typed refusals mirror steer: `not_found`, and `not_running` (use `spawn_continue` directly on a finished run).

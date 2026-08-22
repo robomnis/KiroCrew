@@ -12,17 +12,14 @@ from kiro_crew.run_coordinator import (
     CommandOperation,
     MemoryRunCoordinator,
     OwnerLease,
-    ShadowRunCoordinator,
     SQLiteRunCoordinator,
 )
 from kiro_crew.subagent import SubagentInfo, SubagentManager
 
 
-def test_subagent_manager_defaults_to_memory_primary_with_sqlite_shadow() -> None:
+def test_subagent_manager_defaults_to_durable_sqlite_coordinator() -> None:
     manager = SubagentManager(sessions=MagicMock(), ctx_builder=MagicMock())
-    assert isinstance(manager._coordinator, ShadowRunCoordinator)
-    assert isinstance(manager._coordinator._primary, MemoryRunCoordinator)
-    assert isinstance(manager._coordinator._shadow, SQLiteRunCoordinator)
+    assert isinstance(manager._coordinator, SQLiteRunCoordinator)
 
 
 def test_subagent_manager_preserves_injected_coordinator_identity() -> None:
@@ -33,6 +30,8 @@ def test_subagent_manager_preserves_injected_coordinator_identity() -> None:
         coordinator=coordinator,
     )
     assert manager._coordinator is coordinator
+    assert manager.command_authority._coordinator is coordinator
+    assert manager.command_authority._manager is manager
 
 
 @pytest.mark.asyncio
@@ -201,3 +200,45 @@ async def test_run_records_shadow_submission_before_execution() -> None:
     await manager._run(SubagentInfo(id="run-4", task="task"))
 
     assert order == ["submit", "execute"]
+
+
+@pytest.mark.asyncio
+async def test_authoritatively_admitted_run_does_not_submit_twice() -> None:
+    coordinator = AsyncMock()
+    manager = SubagentManager(
+        sessions=MagicMock(),
+        ctx_builder=MagicMock(),
+        coordinator=coordinator,
+    )
+    manager._run_inner = AsyncMock()
+    manager._teardown_run_session = AsyncMock()
+    manager._claim_finalize = MagicMock(return_value=False)
+    manager.command_authority.execution_started = AsyncMock()
+    info = SubagentInfo(id="run-5", task="task", _coordinator_admitted=True)
+
+    await manager._run(info)
+
+    coordinator.submit.assert_not_awaited()
+    manager._run_inner.assert_awaited_once()
+    manager.command_authority.execution_started.assert_awaited_once_with("run-5")
+
+
+@pytest.mark.asyncio
+async def test_queued_cancel_stops_the_authority_lease() -> None:
+    manager = SubagentManager(sessions=MagicMock(), ctx_builder=MagicMock())
+    manager._unqueue = MagicMock(return_value=True)
+    manager.command_authority.stop_execution_heartbeat = AsyncMock()
+
+    assert await manager.cancel("queued-run") is True
+
+    manager.command_authority.stop_execution_heartbeat.assert_awaited_once_with("queued-run")
+
+
+@pytest.mark.asyncio
+async def test_manager_shutdown_closes_command_authority() -> None:
+    manager = SubagentManager(sessions=MagicMock(), ctx_builder=MagicMock())
+    manager.command_authority.close = AsyncMock()
+
+    await manager.cancel_all()
+
+    manager.command_authority.close.assert_awaited_once_with()
