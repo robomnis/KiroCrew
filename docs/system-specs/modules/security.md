@@ -937,6 +937,33 @@ the destination's ordinary security checks and to the effective
 
 `_run_json()` emits credential-free SEL tool-invocation lifecycle events around every provider CLI attempt. Unsupported providers, invalid bounds, Windows sandbox absence, untrusted executables, and sandbox rejection record `denied`. An allowlisted command awaits its synchronous critical `invoked` append on a worker thread immediately before spawn, so an audit filesystem failure denies execution rather than launching a credential-bearing process unaudited, without blocking the gateway event loop. Cancellation while that worker is active remains fail-closed and waits for it to settle; if `invoked` landed, cleanup records `failed/request_cancelled` before re-raising and never spawns the provider. Provider launchers run in a dedicated process group, and timeout, output-overflow, and cancellation cleanup kills and reaps the complete launcher/provider tree so a sandbox wrapper cannot leave `gh` or `glab` orphaned on an unread pipe. Successful JSON decoding records `completed`; spawn, output, timeout, nonzero exit, decode, cancellation, and internal errors record `failed` with only a coarse reason. Audit records contain the logical provider (`gh`/`glab`), not argv, URL, repo path, output, environment, token, thread id, or exception text. Terminal audit failures are best effort and never alter an already-completed provider result.
 
+**Structured GitHub monitor provider boundary**
+(`monitoring/github_pull_request.py`): background pull-request shadow probes are a
+separate monitor-owned consumer of the shared synchronous `github_runner`, not of the
+dashboard handler. The target gate accepts only exact public `github.com` HTTPS
+pull-request identities and normalizes `www.github.com`; it refuses arbitrary and
+enterprise hosts, credentials/ports, repository-only paths, suffixes, queries,
+fragments, and invalid owner/repository/number segments before resolving `gh`. Every
+provider call uses the runner's validated absolute executable, minimal GitHub-only
+environment, audit-or-deny invocation record, strict UTF-8 decoding, and
+`pin_host="github.com"`; no monitor-specific token source or credential storage
+exists.
+
+Raw stdout, stderr, response envelopes, URLs, timestamps, cursor/request ids, bodies,
+comments, and logs never cross the adapter boundary into monitor state, exceptions,
+or logging. Canonical state is an explicit small allowlist; check labels are stripped
+of URLs and passed through `security.redact()` before persistence. Provider failures
+are reduced in memory to fixed error kinds and reason codes, including a non-retryable
+setup kind for missing, untrusted, or unexecutable `gh`; raw diagnostic text is then
+discarded. Open-PR review-thread pagination is bounded to ten 100-node pages, and
+incomplete or capped evidence fails closed as pending; a terminal merged/closed
+primary state does not issue that secondary request. Shadow execution has no dispatcher
+dependency and refuses an enabled wake request before either provider or persistence
+work, so it cannot turn ambient GitHub authority into a model wake in this slice.
+
+The provider adapter's redaction is classified as inbound canonicalization rather
+than an egress surface.
+
 Sidebar status follows the same read-only boundary. `GET /api/chat/slots` and the WebSocket handshake schedule provider refreshes and opt into cached `ci`/`state` fields only for an exact configured-owner request, or for signed `local-app`/`local-startup` dashboard subjects when no owner is configured. Generic slot serialization omits those fields. `DashboardState` tracks owner-authorized WebSockets separately, sends generic slot updates to all authenticated clients, then overlays credential-backed status only to the owner subset. This prevents a cache populated by an owner request from being replayed to a non-owner or app-token caller. Review-thread cache removal, generation advancement, and stale in-flight detachment still complete after thread ownership validation and before mutation dispatch, so cancellation cannot preserve or repopulate pre-mutation data.
 
 **App-token least-privilege scope (CWE-269)** (`token_auth.py`): an app token is confined to its own app namespace + the API path prefixes the app declares in its manifest `permissions.api` allowlist; everything else is denied. `_enforce_app_scope()` is **deny-by-default** — `_app_api_allowlist()` returns an empty tuple on any failure (app not installed, manifest unreadable), confining the app to its own namespace only. Enforced at all grant points (the normal cookie/query-param flow and the cross-app `/apps/<other>/api` reverse-proxy path re-check); dashboard-user tokens (empty `app` claim) bypass the gate entirely. Denials emit a `log_api_access` SEL event (`operation="app_scope_check"`, `outcome="denied"`).
