@@ -102,7 +102,11 @@ vi.mock('../components/TerminalKeyBar', () => ({ default: () => <div data-testid
 const touch = vi.hoisted(() => ({ value: false }))
 vi.mock('../hooks/useIsTouchDevice', () => ({ useIsTouchDevice: () => touch.value }))
 
-import CliPanel, { disposeTerminalSession, useDeleteTerminalSession } from '../components/CliPanel'
+import CliPanel, {
+  __resetTerminalThemeSyncForTests,
+  disposeTerminalSession,
+  useDeleteTerminalSession,
+} from '../components/CliPanel'
 import { setTerminalFontSize, __resetTerminalFontStore } from '../hooks/useTerminalFont'
 
 /* ── harness ──────────────────────────────────────────────────────────────── */
@@ -190,12 +194,14 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  __resetTerminalThemeSyncForTests()
   for (const id of live) disposeTerminalSession(id)
   live.clear()
   restoreLayout()
   __resetTerminalFontStore()
   vi.unstubAllGlobals()
   document.documentElement.removeAttribute('data-theme')
+  document.documentElement.style.removeProperty('--accent')
   for (const s of Array.from(document.head.querySelectorAll('style'))) {
     if (s.id.startsWith('mc-custom-theme-') || s.id === 'unrelated-style') s.remove()
   }
@@ -555,6 +561,10 @@ describe('CliPanel theme and font sync', () => {
     const style = document.createElement('style')
     style.id = 'mc-custom-theme-probe'
     style.textContent = ':root { --accent: #ff8800; }'
+    // The observer is the behavior under test. Establish the computed value
+    // separately so this does not race happy-dom's asynchronous stylesheet
+    // application against the deliberately synchronous rAF fixture.
+    document.documentElement.style.setProperty('--accent', '#ff8800')
     act(() => { document.head.appendChild(style) })
     await waitFor(() => expect(term.options.theme?.cursor).toBe('#ff8800'))
   })
@@ -581,6 +591,7 @@ describe('CliPanel theme and font sync', () => {
     const style = document.createElement('style')
     style.id = 'mc-custom-theme-probe'
     style.textContent = ':root { --accent: #ff8800; }'
+    document.documentElement.style.setProperty('--accent', '#ff8800')
     act(() => { document.head.appendChild(style) })
 
     await waitFor(() => expect(term.options.theme?.cursor).toBe('#ff8800'))
