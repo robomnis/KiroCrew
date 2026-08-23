@@ -9461,7 +9461,7 @@
       "learn_more": "En savoir plus",
       "learn_more_docs": "En savoir plus dans la documentation",
       "lede": "{{productName}} peut placer son propre stub devant un serveur MCP au lieu de laisser chaque session lancer ce serveur elle-même. Le stub est ce qui permet au serveur de dessiner sa propre interface (MCP Apps) et la seule chose vers laquelle un backend partagé peut être routé — il s'active donc serveur par serveur. {{link}}",
-      "legend": "direct — la session lance le serveur elle-même, exactement comme sans {{productName}}. stub — le stub de {{productName}} est dans le chemin, le serveur peut donc dessiner sa propre interface ; le backend reste propre à cette session. shared — le stub est routé vers un backend partagé avec d'autres sessions. Un serveur sans tube stdio ne peut pas recevoir de stub.",
+      "legend": "direct — la session lance le serveur elle-même, exactement comme sans {{productName}}. stub — le stub de {{productName}} est dans le chemin, le serveur peut donc dessiner sa propre interface ; le backend reste propre à cette session. shared — le stub est routé vers un backend partagé avec d'autres sessions. direct (env) — le serveur declare une cle d'environnement qu'un backend partage retiendrait, donc Kiro Crew ne cree aucun stub : la session le demarre elle-meme, sans backend partage et sans interface fournie par le serveur. Un serveur sans tube stdio ne peut pas recevoir de stub.",
       "no_servers": "Aucun serveur MCP n'est encore configuré.",
       "open_sessions_note": "Les changements ici s'appliquent aux nouvelles conversations. Une conversation déjà ouverte garde les serveurs avec lesquels elle a démarré jusqu'à ce que tu la rouvres.",
       "resolve_description": "Un serveur npx demande au registre ce que signifie sa version a chaque demarrage. La pre-resolution l'installe une fois, puis un demarrage execute la copie installee -- sans resolution de dependances ni reseau. Les versions non figees se rafraichissent selon leur propre rythme ; Mettre a jour verifie la source immediatement.",
@@ -9495,7 +9495,9 @@
       "unsupported_platform": "Le partage de backend nécessite des sockets de domaine Unix et n'est pas disponible sur cette plateforme.",
       "view_assessment": "Évaluation du partage",
       "view_servers": "Serveurs",
-      "views_aria": "Vues de gestion MCP"
+      "views_aria": "Vues de gestion MCP",
+      "state_direct_env": "direct (env)",
+      "state_direct_env_reason": "Demarre directement, sans stub."
     },
     "migrationPage": {
       "app_migration": "Migration de l'app",

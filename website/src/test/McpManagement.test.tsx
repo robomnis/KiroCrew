@@ -25,6 +25,7 @@ type Server = {
   agents: string[]
   transport: string
   denylisted: boolean
+  pooling_blocked_by_env?: boolean
 }
 
 function server(over: Partial<Server> = {}): Server {
@@ -1076,5 +1077,262 @@ describe('stub every server the evidence allows', () => {
     // An unmapped tier falls back to "not measured", which would read as the
     // measurement having never happened.
     expect(await screen.findByText(/measured, no divergence/i)).toBeTruthy()
+  })
+})
+
+// The bug this branch fixes: the STATE chip was derived from allowlist
+// membership and the global switch, never from what the rewriter actually did.
+// A server the rewriter LEFT UNWRAPPED (it declares an env key, so it launches
+// per session with no pooled backend) still read as "shared" with its toggle
+// lit. The backend already sends `pooling_blocked_by_env`; the chip now honours
+// it. Absence of the field must keep reading as today, for the older-gateway
+// contract the field's own comment states.
+describe('state chip honours the rewriter, not just the allowlist', () => {
+  it('reads a blocked, allowlisted, sharing-on server as unwrapped, not shared', async () => {
+    // Every input the OLD mapping consulted says "shared": in the allowlist,
+    // stub true, global sharing on. Only the rewriter's own verdict says
+    // otherwise, and it is the one that decides.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ enabled: true, stub: ['alpha-mcp'], stub_count: 1 }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({
+          name: 'alpha-mcp',
+          stub: true,
+          in_allowlist: true,
+          pooling_blocked_by_env: true,
+        }),
+      ],
+    } as never)
+
+    mount()
+    // The chip no longer claims a shared backend the broker never built.
+    const chip = await screen.findByText('direct (env)', { selector: 'span' })
+    expect(chip).toBeTruthy()
+    // A state is a term, not a sentence. Every shipped locale renders this longer
+    // than the English, and a badge broken across two ragged lines beside the
+    // single-line `shared` and `direct` pills reads as unfinished UI.
+    expect(chip.className).toContain('whitespace-nowrap')
+    expect(screen.queryByText('shared', { selector: 'span' })).toBeNull()
+  })
+
+  it('surfaces why it is unwrapped, next to the chip', async () => {
+    // The chip provokes "why is this not shared"; one line answers it in place.
+    // The knob name lives in the table legend rather than repeating in every
+    // blocked row -- the reason line is rendered always-visible, so a paragraph
+    // there multiplies row height by the number of blocked servers.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ enabled: true, stub: ['alpha-mcp'], stub_count: 1 }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({
+          name: 'alpha-mcp',
+          stub: true,
+          in_allowlist: true,
+          pooling_blocked_by_env: true,
+        }),
+      ],
+    } as never)
+
+    mount()
+    const reason = await screen.findByText(/launched directly, without the stub/i)
+    // The line states the CONSEQUENCE, and states it once. `(env)` is already in
+    // the chip a line above, so restating the qualifier here would put the same
+    // parenthetical on two adjacent lines of one cell.
+    expect(reason.textContent).not.toMatch(/\(\s*env/i)
+    const legend = screen.getByText(/direct \(env\) — the server declares an environment key/i)
+    expect(legend).toBeTruthy()
+    // The whole point of this state: on this branch the rewriter passes the
+    // original spec through and never builds a stub. Copy that says the stub IS in
+    // the path reproduces the very defect this change removes -- the page
+    // reporting work the broker did not do -- and would tell the operator they
+    // kept server-authored UI when they did not.
+    expect(legend.textContent).toMatch(/does not stub it at all/i)
+    expect(legend.textContent).toMatch(/no server-authored UI/i)
+    // No remedy is promised. `forward_declared_env` defaults ON, so for the common
+    // cause -- credential and rotating-secret keys, which are never forwarded --
+    // naming that switch sends the operator to flip something already enabled. One
+    // bool on the wire cannot tell the two causes apart, so it advises neither.
+    expect(legend.textContent).not.toMatch(/forward_declared_env/i)
+  })
+
+  it('does not colour a blocked row as if it were sharing', async () => {
+    // The defect this PR exists to remove was the page contradicting itself, and
+    // a chip whose TEXT says unwrapped while its COLOUR is the shared accent
+    // reproduces it on one row: an operator scanning the column by colour reads
+    // the old answer. Styling and label are therefore driven by one derivation.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ enabled: true, stub: ['alpha-mcp'], stub_count: 1 }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({
+          name: 'alpha-mcp',
+          stub: true,
+          in_allowlist: true,
+          pooling_blocked_by_env: true,
+        }),
+      ],
+    } as never)
+
+    mount()
+    const chip = await screen.findByText('direct (env)', { selector: 'span' })
+    expect(chip.className).not.toContain('--accent')
+    expect(chip.className).toContain('--muted')
+  })
+
+  it('still colours a genuinely shared row with the accent', async () => {
+    // The counterpart the negative test above cannot give: withholding the accent
+    // from a blocked row is only correct if the accent still arrives for a row that
+    // IS pooled. Both now read one derivation -- `stateLabelKey` -- so this fails
+    // the moment the colour is keyed off a second spelling of "is shared" that
+    // disagrees with the label.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ enabled: true, stub: ['alpha-mcp'], stub_count: 1 }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({
+          name: 'alpha-mcp',
+          stub: true,
+          in_allowlist: true,
+          pooling_blocked_by_env: false,
+        }),
+      ],
+    } as never)
+
+    mount()
+    const chip = await screen.findByText('shared', { selector: 'span' })
+    expect(chip.className).toContain('--accent')
+    expect(screen.queryByText(/launched directly, without the stub/i)).toBeNull()
+  })
+
+  it('does not flag a blocked row as sharing without support', async () => {
+    // A row the rewriter left unwrapped is not sharing at all, so contrary
+    // evidence about sharing cannot apply to it. The same predicate feeds the
+    // assessment view's count, so excluding it here keeps that number honest too:
+    // it must not offer to send the operator to a row that is not co-tenanted.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ enabled: true, stub: ['alpha-mcp'], stub_count: 1 }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({
+          name: 'alpha-mcp',
+          stub: true,
+          in_allowlist: true,
+          pooling_blocked_by_env: true,
+          recommendation: {
+            strength: 'refuted',
+            recommendStub: false,
+            recommendShare: false,
+            reasons: [{ code: 'observed_hazard', detail: 'unroutable_notification' }],
+          },
+        }),
+      ],
+    } as never)
+
+    mount()
+    const chip = await screen.findByText('direct (env)', { selector: 'span' })
+    // `refuted` on a row that IS sharing draws the danger style; here it must not.
+    expect(chip.className).not.toContain('--danger')
+  })
+
+  it('leaves an un-stubbed blocked row reading direct, with no reason line', async () => {
+    // Two different states must not collapse into one label. On an un-stubbed row
+    // the field is forward-looking -- "stubbing this would still not pool it",
+    // which is what the batch action uses it for -- while the row's CURRENT state
+    // is plainly `direct`. Reporting it as the blocked state would lose the fact
+    // that the stub is not in the path (the page's own lede says the stub is what
+    // enables server-authored UI) and would offer advice that changes nothing
+    // until the server is stubbed.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(status({ enabled: true }) as never)
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({
+          name: 'echo-mcp',
+          stub: false,
+          in_allowlist: false,
+          pooling_blocked_by_env: true,
+        }),
+      ],
+    } as never)
+
+    mount()
+    expect(await screen.findByText('direct', { selector: 'span' })).toBeTruthy()
+    expect(screen.queryByText('direct (env)', { selector: 'span' })).toBeNull()
+    expect(screen.queryByText(/launched directly, without the stub/i)).toBeNull()
+  })
+
+  it('keeps the label off the global switch, as defensive rendering', async () => {
+    // Scope stated honestly: the backend computes the field as
+    // `gw_cfg.enabled and <withheld env>`, so with sharing OFF it is always false
+    // and a real gateway never sends this combination. What this pins is that the
+    // CLIENT does not re-introduce the dependency -- the mapping reads the
+    // rewriter's verdict alone, so a later backend change cannot silently restore
+    // the old behaviour here.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(status({ enabled: false }) as never)
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({ name: 'alpha-mcp', stub: true, in_allowlist: true, pooling_blocked_by_env: true }),
+      ],
+    } as never)
+
+    mount()
+    expect(await screen.findByText('direct (env)', { selector: 'span' })).toBeTruthy()
+    expect(screen.queryByText('stub', { selector: 'span' })).toBeNull()
+  })
+
+  it('renders exactly as today when the field is absent (older-gateway contract)', async () => {
+    // The regression guard for the field's own contract: a dashboard pointed at
+    // an older gateway receives no `pooling_blocked_by_env`, and its ABSENCE must
+    // read as "no obstacle known", never as an obstacle. A stubbed, allowlisted,
+    // sharing-on server still reads "shared" with no reason line.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ enabled: true, stub: ['alpha-mcp'], stub_count: 1 }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [server({ name: 'alpha-mcp', stub: true, in_allowlist: true })],
+    } as never)
+
+    mount()
+    expect(await screen.findByText('shared', { selector: 'span' })).toBeTruthy()
+    expect(screen.queryByText('direct (env)', { selector: 'span' })).toBeNull()
+    expect(screen.queryByText(/launched directly, without the stub/i)).toBeNull()
+  })
+
+  it('reads pooling_blocked_by_env:false as no obstacle, exactly like absent', async () => {
+    // Only `=== true` is an obstacle. An explicit false is the gateway saying it
+    // measured no block, and must behave identically to the field being absent.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(
+      status({ enabled: true, stub: ['alpha-mcp'], stub_count: 1 }) as never,
+    )
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({ name: 'alpha-mcp', stub: true, in_allowlist: true, pooling_blocked_by_env: false }),
+      ],
+    } as never)
+
+    mount()
+    expect(await screen.findByText('shared', { selector: 'span' })).toBeTruthy()
+    expect(screen.queryByText('direct (env)', { selector: 'span' })).toBeNull()
+  })
+
+  it('keeps the existing states unchanged for unblocked rows', async () => {
+    // direct: not stubbed, not blocked. no stdio: can_stub false. These are the
+    // paths the fix must not disturb.
+    vi.spyOn(api, 'mcpGatewayStatus').mockResolvedValue(status({ enabled: true }) as never)
+    vi.spyOn(api, 'mcpGatewayServers').mockResolvedValue({
+      servers: [
+        server({ name: 'direct-mcp' }),
+        server({ name: 'nostdio-mcp', can_stub: false }),
+      ],
+    } as never)
+
+    mount()
+    expect(await screen.findByText('direct', { selector: 'span' })).toBeTruthy()
+    expect(screen.getByText('no stdio', { selector: 'span' })).toBeTruthy()
   })
 })

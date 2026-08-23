@@ -9345,7 +9345,7 @@
       "learn_more": "Mehr erfahren",
       "learn_more_docs": "Mehr in der Dokumentation",
       "lede": "{{productName}} kann einen eigenen Stub vor einen MCP-Server setzen, statt jede Sitzung den Server selbst starten zu lassen. Der Stub ist die Voraussetzung dafür, dass ein Server seine eigene Oberfläche zeichnet (MCP Apps), und das Einzige, worüber ein geteiltes Backend geleitet werden kann — deshalb ist er pro Server aktivierbar. {{link}}",
-      "legend": "direct — die Sitzung startet den Server selbst, genau wie ohne {{productName}}. stub — der Stub von {{productName}} liegt im Pfad, der Server kann seine eigene Oberfläche zeichnen; das Backend gehört weiterhin dieser Sitzung. shared — der Stub wird auf ein Backend geleitet, das mit anderen Sitzungen geteilt wird. Ein Server ohne stdio-Pipe kann keinen Stub bekommen.",
+      "legend": "direct — die Sitzung startet den Server selbst, genau wie ohne {{productName}}. stub — der Stub von {{productName}} liegt im Pfad, der Server kann seine eigene Oberfläche zeichnen; das Backend gehört weiterhin dieser Sitzung. shared — der Stub wird auf ein Backend geleitet, das mit anderen Sitzungen geteilt wird. direkt (env) — der Server deklariert einen Umgebungsschluessel, den ein geteiltes Backend zurueckhalten wuerde; Kiro Crew erstellt daher keinen Stub: die Sitzung startet ihn selbst, ohne geteiltes Backend und ohne servereigene UI. Ein Server ohne stdio-Pipe kann keinen Stub bekommen.",
       "no_servers": "Es sind noch keine MCP-Server konfiguriert.",
       "open_sessions_note": "Änderungen hier gelten für neue Chats. Ein bereits geöffneter Chat behält die Server, mit denen er gestartet ist, bis Sie ihn neu öffnen.",
       "resolve_description": "Ein npx-Server fragt bei jedem Start die Registry, was seine Versionsangabe bedeutet. Beim Vorab-Auflösen wird er einmal installiert, sodass ein Start die installierte Kopie ausführt -- ohne Abhängigkeitsauflösung und ohne Netzwerk. Nicht festgelegte Angaben werden nach eigenem Zeitplan aktualisiert; mit Jetzt aktualisieren prüfen Sie die Quelle sofort.",
@@ -9379,7 +9379,9 @@
       "unsupported_platform": "Das Teilen von Backends benötigt Unix-Domain-Sockets und ist auf dieser Plattform nicht verfügbar.",
       "view_assessment": "Freigabebewertung",
       "view_servers": "Server",
-      "views_aria": "MCP-Verwaltungsansichten"
+      "views_aria": "MCP-Verwaltungsansichten",
+      "state_direct_env": "direkt (env)",
+      "state_direct_env_reason": "Wird direkt gestartet, ohne Stub."
     },
     "migrationPage": {
       "app_migration": "App-Migration",

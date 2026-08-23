@@ -9461,7 +9461,7 @@
       "learn_more": "Saiba mais",
       "learn_more_docs": "Saiba mais na documentação",
       "lede": "O {{productName}} pode colocar o seu próprio stub à frente de um servidor MCP em vez de deixar cada sessão iniciar esse servidor por conta própria. O stub é o que permite que o servidor desenhe a sua própria interface (MCP Apps) e a única coisa para a qual um backend compartilhado pode ser roteado, por isso é ativado servidor por servidor. {{link}}",
-      "legend": "direct — a sessão inicia o servidor por conta própria, exatamente como sem o {{productName}}. stub — o stub do {{productName}} está no caminho, então o servidor pode desenhar a sua própria interface; o backend continua sendo desta sessão. shared — o stub é roteado para um backend compartilhado com outras sessões. Um servidor sem pipe stdio não pode receber stub.",
+      "legend": "direct — a sessão inicia o servidor por conta própria, exatamente como sem o {{productName}}. stub — o stub do {{productName}} está no caminho, então o servidor pode desenhar a sua própria interface; o backend continua sendo desta sessão. shared — o stub é roteado para um backend compartilhado com outras sessões. direto (env) — o servidor declara uma chave de ambiente que um backend compartilhado retiraria, portanto o Kiro Crew nao cria stub algum: a sessao o inicia por conta propria, sem backend compartilhado e sem interface propria do servidor. Um servidor sem pipe stdio não pode receber stub.",
       "no_servers": "Nenhum servidor MCP configurado ainda.",
       "open_sessions_note": "As mudanças aqui valem para novas conversas. Uma conversa já aberta mantém os servidores com que começou até você reabri-la.",
       "resolve_description": "Um servidor npx pergunta ao registro o que significa sua versao em cada inicializacao. Pre-resolver o instala uma vez, para que a inicializacao execute a copia instalada -- sem resolucao de dependencias e sem rede. Versoes nao fixadas sao atualizadas no proprio intervalo; Atualizar agora consulta a origem imediatamente.",
@@ -9495,7 +9495,9 @@
       "unsupported_platform": "Compartilhar backends exige sockets de domínio Unix, então não está disponível nesta plataforma.",
       "view_assessment": "Avaliação de compartilhamento",
       "view_servers": "Servidores",
-      "views_aria": "Visualizações de gerenciamento do MCP"
+      "views_aria": "Visualizações de gerenciamento do MCP",
+      "state_direct_env": "direto (env)",
+      "state_direct_env_reason": "Iniciado diretamente, sem stub."
     },
     "migrationPage": {
       "app_migration": "Migração de app",

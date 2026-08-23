@@ -9229,7 +9229,7 @@
       "learn_more": "了解更多",
       "learn_more_docs": "查看文档了解更多",
       "lede": "{{productName}} 可以在 MCP 服务器前面放一个自己的桩，而不是让每个会话各自去启动那台服务器。桩是服务器自绘界面（MCP Apps）的前提，也是共享后端唯一能路由到的东西 —— 所以它按服务器逐台开启。 {{link}}",
-      "legend": "direct —— 会话自己启动服务器，和没有 {{productName}} 时完全一样。stub —— {{productName}} 的桩在链路里，所以服务器能自绘界面；后端仍归本会话独有。shared —— 桩路由到与其他会话共用的同一个后端。没有 stdio 管道的服务器无法插桩。",
+      "legend": "direct —— 会话自己启动服务器，和没有 {{productName}} 时完全一样。stub —— {{productName}} 的桩在链路里，所以服务器能自绘界面；后端仍归本会话独有。shared —— 桩路由到与其他会话共用的同一个后端。直连（环境变量） — 该服务器声明了共享后端不会传递的环境变量密钥，因此 Kiro Crew 完全不为它插桩：由会话自行启动，既无共享后端，也无服务器自带界面。没有 stdio 管道的服务器无法插桩。",
       "no_servers": "尚未配置任何 MCP server。",
       "open_sessions_note": "这里的变更对新对话生效。已经打开的对话会保持它启动时的服务器，直到你重新打开它。",
       "resolve_description": "npx 服务器每次启动都会向 registry 询问版本规格的含义。预解析会安装一次，之后启动直接运行已安装的副本 —— 不做依赖解析，也不需要网络。未固定版本的规格会按自己的周期刷新；点击立即更新可马上检查上游。",
@@ -9263,7 +9263,9 @@
       "unsupported_platform": "共享后端需要 Unix 域套接字，因此在当前平台不可用。",
       "view_assessment": "共享评估",
       "view_servers": "服务器",
-      "views_aria": "MCP 管理视图"
+      "views_aria": "MCP 管理视图",
+      "state_direct_env": "直连（环境变量）",
+      "state_direct_env_reason": "不经插桩，直接启动。"
     },
     "migrationPage": {
       "app_migration": "应用迁移",

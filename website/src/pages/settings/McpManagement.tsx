@@ -118,9 +118,31 @@ const REASON_LABEL_KEY: Record<string, string> = {
  * The assessment table has to name the current state to be able to show it
  * disagreeing with the verdict, and two copies of this mapping would be free to
  * drift into saying different things about the same row.
+ *
+ * This is the SOLE derivation of a row's state. The chip's text, the chip's
+ * colour, the per-row reason line and the sharing-without-support warning all read
+ * its answer instead of recomputing their own, because a second spelling of any of
+ * these states is the defect this change exists to remove: one copy gets corrected
+ * and the other keeps saying `shared`.
  */
 function stateLabelKey(s: McpManagedServer, sharingOn: boolean): string {
   if (!s.can_stub) return 'pages.mcpManagement.state_no_stub'
+  // The rewriter's decision outranks allowlist membership and the global switch,
+  // but only for a row the operator opted IN, because that is the only row whose
+  // state would otherwise be reported as shared.
+  //
+  // The state is `direct`, not a fourth thing: on this branch the rewriter passes
+  // the ORIGINAL spec through and never reaches `_build_stub_entry`, so no stub is
+  // created and the session launches the server itself -- which is what `direct`
+  // means everywhere else on this page. `(env)` marks WHY an opted-in server ended
+  // up there, and is the only part that is new.
+  //
+  // A row the operator did NOT opt in reads plain `direct`: there the field is
+  // forward-looking ("stubbing this would still not pool it"), which the batch
+  // action uses as a skip reason, and nothing has been declined yet to explain.
+  if (s.stub && s.pooling_blocked_by_env === true) {
+    return 'pages.mcpManagement.state_direct_env'
+  }
   if (s.stub && sharingOn) return 'pages.mcpManagement.state_shared'
   if (s.stub) return 'pages.mcpManagement.state_stub'
   return 'pages.mcpManagement.state_direct'
@@ -151,9 +173,18 @@ const CONTRARY_STRENGTHS = new Set(['refuted', 'disqualified'])
  *     only coloured signal on the page.
  *
  * Both of those are quiet. What speaks is `refuted` or `disqualified`.
+ *
+ * A row the rewriter declined to stub is not sharing at all, so it cannot be
+ * sharing-without-support however damning its evidence is. That exclusion is not
+ * spelled here: this asks `stateLabelKey` whether the row's state IS `shared`,
+ * because a second spelling of "is sharing right now" is the same mistake as the
+ * colour that used to disagree with the label -- one copy gets a new state added
+ * to it and the other does not. Reading the label fixes both readers at once: the
+ * warning icon on the row and the count the assessment view sends the operator
+ * over to find.
  */
 function sharedWithoutSupport(s: McpManagedServer, sharingOn: boolean): boolean {
-  if (!(s.stub && sharingOn)) return false
+  if (stateLabelKey(s, sharingOn) !== 'pages.mcpManagement.state_shared') return false
   const rec = s.recommendation
   if (!rec) return false
   return CONTRARY_STRENGTHS.has(rec.strength)
@@ -310,7 +341,7 @@ function AssessmentRow({
       <td className="px-4 py-3 align-top text-right">
         <span
           className={[
-            'inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px]',
+            'inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 font-mono text-[11px]',
             unsupported
               ? 'border border-[var(--danger)] text-[var(--danger)]'
               : 'border border-[var(--border)] text-[var(--muted)]',
@@ -1134,7 +1165,16 @@ export function McpManagement() {
           </thead>
           <tbody>
             {servers.map(s => {
-              const shared = s.stub && !!status?.enabled
+              // `stateLabelKey` is the ONE derivation of this row's state, and the
+              // colour and the reason line read its answer rather than recomputing
+              // it. Deriving them separately is what produced this defect -- the
+              // text can be corrected while the colour still says `shared`, and an
+              // operator scanning the column by colour reads the old answer every
+              // visit -- so a second spelling of "is shared" here would rebuild the
+              // divergence one state later.
+              const stateKey = stateLabelKey(s, !!status?.enabled)
+              const shared = stateKey === 'pages.mcpManagement.state_shared'
+              const directEnv = stateKey === 'pages.mcpManagement.state_direct_env'
               // The assessment view's warning sends the operator here, so the
               // rows it counted have to be findable without memorising names.
               const flagged = sharedWithoutSupport(s, !!status?.enabled)
@@ -1154,7 +1194,11 @@ export function McpManagement() {
                   <td className="px-4 py-3">
                     <span
                       className={[
-                        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px]',
+                        // A state is a term, not a sentence: breaking `not shared
+                        // (env)` across two ragged lines reads as a broken badge
+                        // beside the single-line `shared` and `direct` pills, and
+                        // every shipped locale is longer than the English.
+                        'inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 font-mono text-[11px]',
                         flagged
                           ? 'border border-[var(--danger)] text-[var(--danger)]'
                           : shared
@@ -1163,8 +1207,23 @@ export function McpManagement() {
                       ].join(' ')}
                     >
                       {flagged && <AlertTriangle size={11} aria-hidden="true" />}
-                      {i18nT(stateLabelKey(s, !!status?.enabled))}
+                      {i18nT(stateKey)}
                     </span>
+                    {/* Only on a row the operator opted in. The lit STUB toggle
+                        beside it says the opt-in took, so the one thing the chip
+                        cannot say is that the stub was skipped anyway -- and with
+                        it server-authored UI, which the page's lede names as what
+                        the stub is FOR. "Launches per session" would have been true
+                        of the `stub` state too and so distinguished nothing.
+                        No remedy here, and none in the legend either: the wire
+                        field is one bool, while the block has two causes with
+                        different fixes. On a row that was never opted in there is
+                        nothing to have been skipped. */}
+                    {directEnv && (
+                      <span className="mt-1 block text-[11px] leading-snug text-[var(--muted)]">
+                        {i18nT('pages.mcpManagement.state_direct_env_reason')}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <Switch
