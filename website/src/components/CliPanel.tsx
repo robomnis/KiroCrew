@@ -60,6 +60,15 @@ function scheduleTermThemeRefresh() {
   if (_themeRaf) cancelAnimationFrame(_themeRaf)
   _themeRaf = requestAnimationFrame(() => { _themeRaf = 0; refreshTermThemes() })
 }
+/** Drop the theme observer once no terminal is left for it to update. */
+function releaseThemeObserver() {
+  if (_themeRaf) {
+    cancelAnimationFrame(_themeRaf)
+    _themeRaf = 0
+  }
+  _themeObserver?.disconnect()
+  _themeObserver = null
+}
 function ensureThemeObserver() {
   if (_themeObserver || typeof document === 'undefined') return
   // A terminal's xterm colours are a construction-time snapshot (canvas, not
@@ -144,6 +153,14 @@ function destroyTerm(id: string) {
     entry.term.dispose()
     termCache.delete(id)
   }
+  // Last terminal gone: stop watching. The observer exists only to push colours
+  // onto CACHED terminals, so with an empty cache every signal it delivers walks
+  // an empty map -- while still waking on every <style> insertion and every
+  // data-theme flip for the life of the page, which for a dashboard that never
+  // reopens a terminal is all cost and no effect. The next mount re-arms it
+  // through ensureThemeObserver, so nothing is permanently given up. A pending
+  // frame is cancelled with it: it would refresh the same empty map.
+  if (termCache.size === 0) releaseThemeObserver()
 }
 
 /**

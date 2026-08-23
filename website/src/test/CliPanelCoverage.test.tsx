@@ -586,6 +586,44 @@ describe('CliPanel theme and font sync', () => {
     await waitFor(() => expect(term.options.theme?.cursor).toBe('#ff8800'))
   })
 
+  it('re-arms theme sync after the last terminal was disposed', async () => {
+    // The observer is released when the cache empties (nothing to push colours
+    // onto, yet it would still wake on every <style> insertion for the life of
+    // the page). Releasing it is only safe because the next mount re-arms it --
+    // if it did not, closing every terminal tab once would leave every terminal
+    // opened afterwards stuck on the boot palette, with no error anywhere.
+    const first = mount()
+    act(() => { disposeTerminalSession(first.sessionId) })
+    live.delete(first.sessionId)
+
+    const { term } = mount()
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+    const style = document.createElement('style')
+    style.id = 'mc-custom-theme-probe'
+    style.textContent = ':root { --accent: #ff8800; }'
+    act(() => { document.head.appendChild(style) })
+
+    await waitFor(() => expect(term.options.theme?.cursor).toBe('#ff8800'))
+  })
+
+  it('keeps watching while another terminal is still cached', async () => {
+    // The release is gated on an EMPTY cache. Closing one of two tabs must not
+    // stop the survivor tracking the theme -- and with a MutationObserver the
+    // failure is silent: the terminal simply keeps the palette it booted with.
+    const first = mount()
+    const { term: survivor } = mount()
+    act(() => { disposeTerminalSession(first.sessionId) })
+    live.delete(first.sessionId)
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+
+    const style = document.createElement('style')
+    style.id = 'mc-custom-theme-probe'
+    style.textContent = ':root { --accent: #ff8800; }'
+    act(() => { document.head.appendChild(style) })
+
+    await waitFor(() => expect(survivor.options.theme?.cursor).toBe('#ff8800'))
+  })
+
   it('ignores an unrelated style element added to <head>', async () => {
     const { term } = mount()
     // Drain any observer records queued by earlier tests before measuring.

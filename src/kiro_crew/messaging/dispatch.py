@@ -100,6 +100,20 @@ class ChannelTurn:
     """Session-directive consumer for this turn (``build_directive_consumer``).
     ``None`` leaves directive-tool results inert — the pre-consumer behavior."""
 
+    auto_approve_session: Optional[Callable[[], bool]] = None
+    """Predicate consulted per tool request, ahead of the interactive ladder.
+
+    This is how a channel surfaces the process-wide auto-approve grant (``/yolo``,
+    the dashboard toggle) into a turn it drives through here. ``None`` — the
+    default, and what every channel that does not offer an in-channel toggle
+    passes — leaves the ladder exactly as it was: the grant is simply not
+    consulted. It does NOT weaken the security gate; the keystone, the governance
+    ceiling and the deny-list all run ahead of this in ``TurnDriver``, so a hard
+    DENY still wins. Only the interactive PROMPT is skipped.
+
+    Evaluated per request rather than captured as a bool, so a grant that lapses
+    mid-turn stops auto-approving the rest of that turn."""
+
     audit_caller: str = ""
     """SEL audit caller label; defaults to ``<channel_type>:unknown``."""
 
@@ -327,6 +341,7 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
             approval_mode=turn.approval_mode,
             decider=turn.decider,
             auto_approve_tool=build_auto_approve(ctx_builder),
+            auto_approve_session=turn.auto_approve_session,
             tool_gate=build_tool_gate(ctx_builder, session_key=session_key, agent=turn.agent),
             directive_consumer=turn.directive_consumer,
         )

@@ -321,3 +321,63 @@ def test_the_pause_is_read_for_the_role_the_turn_arrived_on(monkeypatch) -> None
         )
     )
     assert mirrored.pause_calls == [("dashboard:chat-1", False)], "a mirror reads the mirror flag"
+
+
+def _capture_driver_kwargs(box: dict) -> type:
+    class _Capturing(_Driver):
+        def __init__(self, provider, renderer, **kw):
+            super().__init__()
+            box.update(kw)
+
+    return _Capturing
+
+
+def test_the_auto_approve_grant_predicate_reaches_the_driver(monkeypatch) -> None:
+    """A channel's auto-approve grant must arrive where approvals are decided.
+
+    ``TurnDriver`` has always accepted ``auto_approve_session`` -- the predicate
+    behind ``/yolo`` and the dashboard toggle -- but this shared skeleton did not
+    forward it, so a channel driven through here could report the grant as ON
+    while every tool request still hit the deny-by-default interactive path. That
+    failure is invisible from the channel side: the ChannelTurn carries the
+    predicate and looks correct.
+
+    Forwarded as the CALLABLE, not its current value, so a grant lapsing mid-turn
+    stops auto-approving the rest of that turn.
+    """
+    box: dict = {}
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(D, "TurnDriver", _capture_driver_kwargs(box))
+    active = False
+    turn = _turn_with_key(_CountingRenderer(), "weixin:agentA:direct:userA")
+    turn.auto_approve_session = lambda: active
+
+    asyncio.run(drive_turn(turn, sessions=_PauseSessions(), ctx_builder=_CtxBuilder()))
+
+    predicate = box.get("auto_approve_session")
+    assert predicate is not None, "the driver never learned about the grant"
+    assert predicate() is False
+    active = True
+    assert predicate() is True, "forwarded as a bool, a lapsing grant would not stop"
+
+
+def test_a_channel_with_no_toggle_forwards_no_predicate(monkeypatch) -> None:
+    """The non-vacuity half: the default must stay "grant not consulted".
+
+    Every channel that offers no in-channel toggle passes nothing, and the ladder
+    has to behave exactly as it did before this seam existed.
+    """
+    box: dict = {}
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(D, "TurnDriver", _capture_driver_kwargs(box))
+
+    asyncio.run(
+        drive_turn(
+            _turn_with_key(_CountingRenderer(), "weixin:agentA:direct:userA"),
+            sessions=_PauseSessions(),
+            ctx_builder=_CtxBuilder(),
+        )
+    )
+
+    assert "auto_approve_session" in box, "the kwarg must be passed, not omitted"
+    assert box["auto_approve_session"] is None

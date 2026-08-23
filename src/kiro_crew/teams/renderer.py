@@ -98,7 +98,8 @@ class TeamsRenderer(Renderer):
         self._buf.append(text)
 
     async def on_thinking(self, text: str) -> None:
-        # Teams does not surface reasoning inline (parity with WeCom/Webex).
+        # Teams does not surface reasoning inline, for Webex's reason rather
+        # than WeCom's: the edit budget is spent on tool progress and the answer.
         return None
 
     async def on_tool_call(
@@ -127,9 +128,7 @@ class TeamsRenderer(Renderer):
         content = self.text() or ("…" if ok else _ERROR_TEXT)
         chunks = chunk_text(content, self.capabilities.max_message_chars) or ["…"]
         for chunk in chunks:
-            sent = await self._client.send_message(
-                self._conversation_id, chunk, self._service_url
-            )
+            sent = await self._client.send_message(self._conversation_id, chunk, self._service_url)
             if sent is None:
                 # Stop at the first failed chunk: the delivered prefix is
                 # coherent, and skipping ahead would splice a gap into the
