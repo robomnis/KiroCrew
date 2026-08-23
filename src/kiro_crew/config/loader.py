@@ -195,6 +195,9 @@ CRED_MICROSOFT_APP_PASSWORD = "MICROSOFT_APP_PASSWORD"
 CRED_MICROSOFT_APP_TENANT_ID = "MICROSOFT_APP_TENANT_ID"
 CRED_WEIXIN_TOKEN = "WEIXIN_TOKEN"  # iLink bot credential from the Settings QR flow
 CRED_JIRA_API_TOKEN = "JIRA_API_TOKEN"  # Jira Cloud/Server API token (resolved from .env)
+CRED_AZURE_DEVOPS_EXT_PAT = "AZURE_DEVOPS_EXT_PAT"
+CRED_BITBUCKET_EMAIL = "BITBUCKET_EMAIL"
+CRED_BITBUCKET_API_TOKEN = "BITBUCKET_API_TOKEN"
 # kiro-cli's OWN model credential. Unlike the gateway-owned channel tokens
 # above, its rightful consumer is the agent subprocess itself (and the whoami
 # identity probe), so it is deliberately NOT in sandbox._AGENT_DENIED_ENV_KEYS:
@@ -215,6 +218,9 @@ _CREDENTIAL_KEYS = (
     CRED_MICROSOFT_APP_TENANT_ID,
     CRED_WEIXIN_TOKEN,
     CRED_JIRA_API_TOKEN,
+    CRED_AZURE_DEVOPS_EXT_PAT,
+    CRED_BITBUCKET_EMAIL,
+    CRED_BITBUCKET_API_TOKEN,
     CRED_KIRO_API_KEY,
 )
 
