@@ -5673,7 +5673,7 @@
       "pin_model_unavailable": "<model/> は現在提供されていません",
       "reasoning": "推論",
       "set_default_for_agent": "<model/> を <agent/> のデフォルトモデルに設定",
-      "set_default_for_new_sessions": "新規セッションのグローバルフォールバック…",
+      "set_default_for_new_sessions": "新規セッションのグローバルデフォルト…",
       "type_to_filter": "フィルターするには入力…"
     },
     "monacoCodeBlock": {
@@ -10514,8 +10514,8 @@
         "context_usage_at_which_auto_compaction_triggers": "自動圧縮がトリガーされるコンテキスト使用率 %。低いほど圧縮頻度が高く、セッションが長くなります",
         "data_ml": "データ / ML",
         "default_auto": "デフォルト（自動）",
-        "default_defers_to_your_agent_config_and_then_to": "フォールバック専用です。設定済みモデルがあるエージェントは、この設定を無視します。「デフォルト」は、エージェント設定のモデルを使用し、未設定の場合はシステムデフォルトを使用します。変更しても、すでに開いているセッションには影響しません。",
-        "default_model": "フォールバックモデル",
+        "default_defers_to_your_agent_config_and_then_to": "独自の設定済みモデルがあるエージェントは、この設定を無視します。「デフォルト」は、エージェント設定のモデルを使用し、未設定の場合はシステムデフォルトを使用します。変更しても、すでに開いているセッションには影響しません。",
+        "default_model": "デフォルトモデル",
         "default_normal_length": "標準 — 通常の長さ",
         "default_reasoning_effort": "デフォルト推論努力度",
         "default_to_autopilot_mode": "オートパイロットモードをデフォルトに",

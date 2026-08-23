@@ -5839,7 +5839,7 @@
       "pin_model_unavailable": "<model/> n’est pas proposé pour le moment",
       "reasoning": "Raisonnement",
       "set_default_for_agent": "Définir <model/> comme modèle par défaut pour <agent/>",
-      "set_default_for_new_sessions": "Repli global pour les nouvelles sessions…",
+      "set_default_for_new_sessions": "Valeur par défaut globale pour les nouvelles sessions…",
       "type_to_filter": "Saisir pour filtrer…"
     },
     "monacoCodeBlock": {
@@ -10769,8 +10769,8 @@
         "context_usage_at_which_auto_compaction_triggers": "% d'utilisation du contexte à partir duquel le compactage automatique se déclenche. Plus bas = compactage plus fréquent, sessions plus longues",
         "data_ml": "Données / ML",
         "default_auto": "Par défaut (auto)",
-        "default_defers_to_your_agent_config_and_then_to": "Solution de secours uniquement : les agents avec un modèle configuré ignorent ce réglage. « Par défaut » utilise le modèle de la configuration de l’agent, ou le modèle système par défaut lorsqu’aucun n’est configuré. Modifier ce réglage n’affecte pas les sessions déjà ouvertes.",
-        "default_model": "Modèle de repli",
+        "default_defers_to_your_agent_config_and_then_to": "Les agents ayant leur propre modèle configuré ignorent ce réglage. «Par défaut» utilise le modèle de la configuration de l’agent, ou le modèle système par défaut lorsqu’aucun n’est configuré. Modifier ce réglage n’affecte pas les sessions déjà ouvertes.",
+        "default_model": "Modèle par défaut",
         "default_normal_length": "Par défaut — longueur normale",
         "default_reasoning_effort": "Effort de raisonnement par défaut",
         "default_to_autopilot_mode": "Mode Autopilot par défaut",

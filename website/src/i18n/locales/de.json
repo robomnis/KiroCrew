@@ -5756,7 +5756,7 @@
       "pin_model_unavailable": "<model/> wird derzeit nicht angeboten",
       "reasoning": "Reasoning",
       "set_default_for_agent": "<model/> als Standardmodell für <agent/> festlegen",
-      "set_default_for_new_sessions": "Globaler Fallback für neue Sitzungen…",
+      "set_default_for_new_sessions": "Globaler Standard für neue Sitzungen…",
       "type_to_filter": "Zum Filtern tippen…"
     },
     "monacoCodeBlock": {
@@ -10641,8 +10641,8 @@
         "context_usage_at_which_auto_compaction_triggers": "Kontextnutzung in %, bei der die automatische Verdichtung ausgelöst wird. Niedriger = häufigere Verdichtung, längere Sitzungen",
         "data_ml": "Daten / ML",
         "default_auto": "Standard (auto)",
-        "default_defers_to_your_agent_config_and_then_to": "Nur als Fallback: Agenten mit einem konfigurierten Modell ignorieren diese Einstellung. „Standard“ verwendet das Modell aus der Agentenkonfiguration oder den Systemstandard, wenn keines konfiguriert ist. Änderungen wirken sich nicht auf bereits geöffnete Sitzungen aus.",
-        "default_model": "Fallback-Modell",
+        "default_defers_to_your_agent_config_and_then_to": "Agenten mit einem eigenen konfigurierten Modell ignorieren diese Einstellung. „Standard“ verwendet das Modell aus der Agentenkonfiguration oder den Systemstandard, wenn keines konfiguriert ist. Änderungen wirken sich nicht auf bereits geöffnete Sitzungen aus.",
+        "default_model": "Standardmodell",
         "default_normal_length": "Standard – normale Länge",
         "default_reasoning_effort": "Standard-Denkaufwand",
         "default_to_autopilot_mode": "Standardmäßig Autopilot-Modus",

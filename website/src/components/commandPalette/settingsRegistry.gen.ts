@@ -156,6 +156,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "chat.default-model",
+    "label": "Default Model",
+    "labelKey": "pages.settings.chatPanel.default_model",
+    "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Capabilities → Agents, or pick one inside a session to override it there.",
+    "tab": "chat",
+    "type": "select",
+    "occurrence": 1
+  },
+  {
     "id": "chat.default-reasoning-effort",
     "label": "Default Reasoning Effort",
     "labelKey": "pages.settings.chatPanel.default_reasoning_effort",
@@ -180,15 +189,6 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Kiro uses this description to adapt vocabulary and examples to your role.",
     "tab": "chat",
     "type": "input",
-    "occurrence": 1
-  },
-  {
-    "id": "chat.fallback-model",
-    "label": "Fallback Model",
-    "labelKey": "pages.settings.chatPanel.default_model",
-    "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Capabilities → Agents, or pick one inside a session to override it there.",
-    "tab": "chat",
-    "type": "select",
     "occurrence": 1
   },
   {

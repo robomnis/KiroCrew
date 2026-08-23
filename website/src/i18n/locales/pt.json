@@ -5839,7 +5839,7 @@
       "pin_model_unavailable": "<model/> não está sendo oferecido no momento",
       "reasoning": "Raciocínio",
       "set_default_for_agent": "Definir <model/> como modelo padrão de <agent/>",
-      "set_default_for_new_sessions": "Reserva global para novas sessões…",
+      "set_default_for_new_sessions": "Padrão global para novas sessões…",
       "type_to_filter": "Digite para filtrar…"
     },
     "monacoCodeBlock": {
@@ -10768,8 +10768,8 @@
         "context_usage_at_which_auto_compaction_triggers": "% de uso do contexto em que a compactação automática é acionada. Menor = compactação mais frequente, sessões mais longas",
         "data_ml": "Dados / ML",
         "default_auto": "Padrão (automático)",
-        "default_defers_to_your_agent_config_and_then_to": "Somente alternativa: agentes com um modelo configurado ignoram esta configuração. 'Padrão' usa o modelo da configuração do agente ou o padrão do sistema quando nenhum estiver configurado. Alterar isso não afeta sessões que já estão abertas.",
-        "default_model": "Modelo de reserva",
+        "default_defers_to_your_agent_config_and_then_to": "Agentes com um modelo configurado próprio ignoram esta configuração. 'Padrão' usa o modelo da configuração do agente ou o padrão do sistema quando nenhum estiver configurado. Alterar isso não afeta sessões que já estão abertas.",
+        "default_model": "Modelo padrão",
         "default_normal_length": "Predefinido — comprimento normal",
         "default_reasoning_effort": "Esforço de raciocínio padrão",
         "default_to_autopilot_mode": "Usar modo Autopilot por padrão",

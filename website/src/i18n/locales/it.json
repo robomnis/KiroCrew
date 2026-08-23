@@ -5839,7 +5839,7 @@
       "pin_model_unavailable": "<model/> non è offerto al momento",
       "reasoning": "Ragionamento",
       "set_default_for_agent": "Imposta <model/> come modello predefinito per <agent/>",
-      "set_default_for_new_sessions": "Fallback globale per le nuove sessioni…",
+      "set_default_for_new_sessions": "Predefinito globale per le nuove sessioni…",
       "type_to_filter": "Digita per filtrare…"
     },
     "monacoCodeBlock": {
@@ -10768,8 +10768,8 @@
         "context_usage_at_which_auto_compaction_triggers": "Percentuale di utilizzo del contesto che attiva la compattazione automatica. Più bassa = compattazione più frequente, sessioni più lunghe",
         "data_ml": "Dati / ML",
         "default_auto": "Predefinito (auto)",
-        "default_defers_to_your_agent_config_and_then_to": "Solo fallback: gli agenti con un modello configurato ignorano questa impostazione. 'Predefinito' usa il modello della configurazione dell’agente oppure quello predefinito del sistema quando non ne è configurato nessuno. La modifica non influisce sulle sessioni già aperte.",
-        "default_model": "Modello di fallback",
+        "default_defers_to_your_agent_config_and_then_to": "Gli agenti con un proprio modello configurato ignorano questa impostazione. 'Predefinito' usa il modello della configurazione dell’agente oppure quello predefinito del sistema quando non ne è configurato nessuno. La modifica non influisce sulle sessioni già aperte.",
+        "default_model": "Modello predefinito",
         "default_normal_length": "Predefinito — lunghezza normale",
         "default_reasoning_effort": "Livello di ragionamento predefinito",
         "default_to_autopilot_mode": "Usa per impostazione predefinita la modalità pilota automatico",
