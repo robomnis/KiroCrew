@@ -128,6 +128,71 @@ class TestFirePathsPassTheCrew:
 
 
 class TestArmRecordsTheCrew:
+    def test_a_channel_binding_key_resolves_its_crew_from_the_session(self):
+        """A `slack:`/`discord:` key has no dashboard slot, so `_slots` answers nothing
+        and the crew lives only on the session. Without this leg the loop armed with
+        agent="" and every nudge body resolved the DEFAULT crew's variables."""
+        from kiro_crew import autonudge_authz as authz
+
+        state = MagicMock()
+        state._slots = {}
+        state.sessions.get_agent.return_value = "oncall"
+        assert authz._armed_crew_for(state, "slack:T1:C1:123.45") == "oncall"
+        state.sessions.get_agent.assert_called_once_with("slack:T1:C1:123.45")
+
+    def test_a_dashboard_slot_still_wins_over_the_session(self):
+        """The slot is the more specific answer and must not be overridden by a
+        session record that disagrees."""
+        from kiro_crew import autonudge_authz as authz
+
+        state = MagicMock()
+        slot = MagicMock()
+        slot.agent = "reviewers"
+        state._slots = {"chat-1": slot}
+        state.sessions.get_agent.return_value = "oncall"
+        assert authz._armed_crew_for(state, "chat-1") == "reviewers"
+        state.sessions.get_agent.assert_not_called()
+
+    def test_an_unbound_loop_still_resolves_the_default_crew(self):
+        """Neither source knows a crew: the empty string is the correct answer and
+        means "default crew" downstream, not an error."""
+        from kiro_crew import autonudge_authz as authz
+
+        state = MagicMock()
+        state._slots = {}
+        state.sessions.get_agent.return_value = ""
+        assert authz._armed_crew_for(state, "chat-9") == ""
+
+    def test_a_slot_with_an_empty_crew_falls_through_to_the_session(self):
+        """A slot can exist and name no crew; that is not an answer, so the session
+        still gets asked. Guards the `if armed:` rather than `if slot is not None:`."""
+        from kiro_crew import autonudge_authz as authz
+
+        state = MagicMock()
+        slot = MagicMock()
+        slot.agent = ""
+        state._slots = {"chat-1": slot}
+        state.sessions.get_agent.return_value = "oncall"
+        assert authz._armed_crew_for(state, "chat-1") == "oncall"
+
+    def test_a_failing_session_store_does_not_take_the_arming_down(self):
+        """A crew name is an optimisation over the default-crew fallback. Raising here
+        would refuse to arm a loop that would otherwise run correctly."""
+        from kiro_crew import autonudge_authz as authz
+
+        state = MagicMock()
+        state._slots = {}
+        state.sessions.get_agent.side_effect = RuntimeError("session store down")
+        assert authz._armed_crew_for(state, "slack:T1:C1:123.45") == ""
+
+    def test_a_state_without_a_session_store_is_tolerated(self):
+        from kiro_crew import autonudge_authz as authz
+
+        class _Bare:
+            _slots: dict = {}
+
+        assert authz._armed_crew_for(_Bare(), "chat-1") == ""
+
     def test_the_chokepoint_reads_the_real_slots_attribute(self):
         """DashboardState exposes `_slots`; there is no `chat_slots` and no
         __getattr__, so the wrong name silently yields {} and every loop would

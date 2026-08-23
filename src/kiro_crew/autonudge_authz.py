@@ -206,6 +206,38 @@ async def authorize_and_update_nudge(
     return loop, None, 200
 
 
+def _armed_crew_for(state: NudgeAuthzState, slot_key: str) -> str:
+    """The crew a monitor loop armed at *slot_key* should resolve variables against.
+
+    Two lookups, because the two caller shapes keep the crew in different places. A
+    dashboard slot carries it on the slot object. A channel binding key (``slack:``,
+    ``discord:``) has no slot at all, so its crew lives only on the SESSION -- and
+    consulting ``_slots`` alone left every channel-bound loop resolving the DEFAULT
+    crew's variables. That failure is silent by construction: ``resolve_variables``
+    falls back to the default crew rather than raising, so the loop runs and simply
+    substitutes another crew's values.
+
+    An empty answer from both is not a failure -- it is a genuinely unbound loop, and
+    the empty string means "resolve the default crew" downstream. The session lookup is
+    best-effort for the same reason: a crew name is an optimisation over that fallback,
+    never a precondition for arming, so a session store that cannot answer must not
+    take the loop down with it.
+    """
+    slot = (getattr(state, "_slots", None) or {}).get(slot_key)
+    if slot is not None:
+        armed = getattr(slot, "agent", "") or ""
+        if armed:
+            return armed
+    sessions = getattr(state, "sessions", None)
+    if sessions is None:
+        return ""
+    try:
+        return sessions.get_agent(slot_key) or ""
+    except Exception:  # noqa: BLE001 - a crew name is best-effort, never fatal
+        logger.debug("autonudge: session crew lookup failed", exc_info=True)
+        return ""
+
+
 async def authorize_and_add_nudge(
     *,
     svc: Any,
@@ -377,13 +409,8 @@ async def authorize_and_add_nudge(
         logger.error("autonudge arm denied: SEL audit unavailable", exc_info=True)
         return None, "audit log unavailable — nudge loop not armed", 503
     # Record the crew this loop is armed under so its nudge bodies resolve that
-    # crew's variables rather than the default crew's. Only a dashboard slot names
-    # a crew here; a channel binding key does not, and an empty value means
-    # "resolve the default crew", which is the pre-existing behaviour.
-    armed_agent = ""
-    _slot = (getattr(state, "_slots", None) or {}).get(slot_key)
-    if _slot is not None:
-        armed_agent = getattr(_slot, "agent", "") or ""
+    # crew's variables rather than the default crew's.
+    armed_agent = _armed_crew_for(state, slot_key)
     try:
         loop = await svc.add(
             slot_key=slot_key,

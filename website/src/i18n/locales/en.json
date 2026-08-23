@@ -7572,7 +7572,19 @@
         "scope_session": "Session",
         "shadowed_by": "Shadowed by {{scope}}",
         "overrides": "Overrides {{scope}}",
-        "workspace_named": "Workspace {{name}}"
+        "workspace_named": "Workspace {{name}}",
+        "usage_hint": "Reference a variable as {{token}} in a message, a cron job or a crew's prompt.",
+        "remove_variable_confirm": "Confirm removing {{name}}",
+        "bulk_edit": "Bulk edit",
+        "bulk_label": "One NAME=value per line",
+        "bulk_apply": "Apply",
+        "bulk_cancel": "Cancel",
+        "bulk_replaces_scope": "Applying replaces this scope: a name missing from the text is removed.",
+        "from_file_note": "Also defined by this workspace's file in {{dir}}. Edit that file to change them.",
+        "overridden_by_panel": "overridden above",
+        "scope_workspace_file": "Workspace file",
+        "file_blocked_not_lowercase": "This workspace cannot use a variables file: the name must be lowercase, because a case-insensitive filesystem would fold it onto another workspace's file and share their variables.",
+        "file_blocked_unusable": "This workspace cannot use a variables file: its name cannot be used as a filename."
       }
     },
     "settingsPage": {
@@ -7864,7 +7876,7 @@
       "secrets": {
         "label": "Secrets",
         "description": "Store API keys and credentials securely"
-    },
+      },
       "variables": {
         "label": "Environment Variables",
         "description": "Reusable values that expand inside agent messages"

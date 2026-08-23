@@ -19,7 +19,7 @@ from kiro_crew.config.loader import (
     KiroCrewAgentConfig,
     KiroCrewConfig,
     WorkspaceConfig,
-    variable_values_for,
+    resolve_variables,
 )
 from kiro_crew.messaging import dispatch as dispatch_mod
 
@@ -36,30 +36,96 @@ def _config() -> KiroCrewConfig:
     return cfg
 
 
+def _values_for(agent_name: str | None = None) -> dict[str, str]:
+    """The effective map for *agent_name*, the way production resolves it.
+
+    A test-local shim rather than a shipped helper: `variable_values_for` used to live
+    in `loader.py` for this, but nothing in `src/` ever called it, so it was public
+    API maintained for the benefit of assertions. The convenience belongs here.
+    """
+    return dict(resolve_variables(loader_mod.KiroCrewConfig.load(), agent_name or None).values)
+
+
 class TestVariableValuesFor:
     def test_returns_the_effective_map(self):
         with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: _config())):
-            values = variable_values_for("crew1")
+            values = _values_for("crew1")
         assert values == {"baseUrl": "https://crew.test", "queue": "oncall"}
 
     def test_unknown_agent_falls_back_to_the_default_crew(self):
         with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: _config())):
-            assert variable_values_for("no-such-crew")["baseUrl"] == "https://crew.test"
+            assert _values_for("no-such-crew")["baseUrl"] == "https://crew.test"
 
-    def test_a_broken_config_yields_an_empty_map_rather_than_raising(self):
+    def test_every_resolve_call_in_production_is_guarded(self):
         """Text is left unexpanded rather than failing the turn: a variable is a
-        convenience, and the message is still what its author meant to send."""
-        with patch.object(
-            loader_mod.KiroCrewConfig,
-            "load",
-            classmethod(lambda cls: (_ for _ in ()).throw(OSError("boom"))),
-        ):
-            assert variable_values_for("crew1") == {}
+        convenience, and the message is still what its author meant to send.
+
+        Asserted over the AST of every module that resolves, rather than through a
+        helper. A `variable_values_for` wrapper used to swallow the exception
+        centrally, but nothing in `src/` ever called it -- so the guard that actually
+        ran was always the one at each call site, and a test through the wrapper proved
+        only that the wrapper worked. Each site also needs a DIFFERENT fallback (the
+        prompt, the message, the job's message, an empty map), which is why this cannot
+        collapse back into one helper.
+
+        Walking the AST rather than matching source text because the enclosing function
+        is nested in two of the four cases, so `getattr` cannot reach it, and a
+        fixed-size source window around the call is the anchor this repo has already
+        watched drift once.
+        """
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "src"
+        # The modules that expand operator-authored text. `handlers/variables.py` is
+        # excluded on purpose: it RENDERS the settings panel, where a malformed store
+        # must surface as an error the operator can act on, not be swallowed.
+        resolvers = (
+            "kiro_crew/context.py",
+            "kiro_crew/cron.py",
+            "kiro_crew/dashboard/chat_runner.py",
+            "kiro_crew/dashboard/handlers/autonudge.py",
+        )
+        checked = 0
+        for rel in resolvers:
+            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+            # Every node that lexically contains a guarded call, so containment is a
+            # set membership test rather than a parent-pointer walk ast does not give.
+            guarded: set[int] = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Try):
+                    continue
+                if not any(
+                    h.type is not None and getattr(h.type, "id", "") == "Exception"
+                    for h in node.handlers
+                ):
+                    continue
+                for child in node.body:
+                    for inner in ast.walk(child):
+                        guarded.add(id(inner))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if (
+                    getattr(fn, "id", "") != "resolve_variables"
+                    and getattr(fn, "attr", "") != "resolve_variables"
+                ):
+                    continue
+                checked += 1
+                assert id(node) in guarded, (
+                    f"{rel}:{node.lineno} calls resolve_variables outside a "
+                    "`try/except Exception`; a malformed config would fail the turn "
+                    "instead of leaving the text unexpanded"
+                )
+        assert checked >= len(resolvers), (
+            f"only found {checked} resolve_variables call(s) across {len(resolvers)} "
+            "modules -- the guard is checking less than it thinks"
+        )
 
     def test_returns_a_copy_so_a_caller_cannot_mutate_config_state(self):
         cfg = _config()
         with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: cfg)):
-            values = variable_values_for("crew1")
+            values = _values_for("crew1")
         values["baseUrl"] = "mutated"
         assert cfg.agents["crew1"].variables["baseUrl"] == "https://crew.test"
 
@@ -83,7 +149,7 @@ class TestDispatchLeavesInboundTextAlone:
         """Not just unused — absent. An import left in place is the first half of a
         re-introduction, and this path must not have the capability at hand."""
         assert not hasattr(dispatch_mod, "expand_variables")
-        assert not hasattr(dispatch_mod, "variable_values_for")
+        assert not hasattr(dispatch_mod, "resolve_variables")
 
     def test_a_channel_message_leaves_a_token_literal(self):
         """The security property, scoped to the function that actually drives a turn.
@@ -97,7 +163,7 @@ class TestDispatchLeavesInboundTextAlone:
         body = inspect.getsource(dispatch_mod.drive_turn)
         assert "expand_variables(" not in body, "the turn body expands participant text"
         assert (
-            "variable_values_for(" not in body
+            "resolve_variables(" not in body
         ), "the turn body resolves a variable map for participant text"
 
         # And the value that WOULD be disclosed is real, so the guard is not
@@ -105,7 +171,7 @@ class TestDispatchLeavesInboundTextAlone:
         cfg = _config()
         cfg.variables = {"SECRET": "operator-only-value"}
         with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: cfg)):
-            assert variable_values_for("crew1")["SECRET"] == "operator-only-value"
+            assert _values_for("crew1")["SECRET"] == "operator-only-value"
 
 
 class TestSharedHelperIsWiredWhereItMatters:
@@ -122,8 +188,8 @@ class TestSharedHelperIsWiredWhereItMatters:
             workspace="ops", variables={"baseUrl": "https://two.test"}
         )
         with patch.object(loader_mod.KiroCrewConfig, "load", classmethod(lambda cls: cfg)):
-            assert variable_values_for("crew2")["baseUrl"] == "https://two.test"
-            assert variable_values_for("crew1")["baseUrl"] == "https://crew.test"
+            assert _values_for("crew2")["baseUrl"] == "https://two.test"
+            assert _values_for("crew1")["baseUrl"] == "https://crew.test"
 
 
 def test_turn_agent_still_selects_the_crew_for_the_system_prompt():
@@ -186,7 +252,7 @@ class TestNoInboundTransportExpands:
     def test_no_transport_resolves_or_expands_a_variable_map(self):
         for rel in self.TRANSPORTS:
             src = self._source(rel)
-            assert "variable_values_for(" not in src, (
+            assert "resolve_variables(" not in src, (
                 f"{rel} resolves a variable map for inbound channel text; a channel "
                 "participant could then read operator config by sending {{NAME}}"
             )

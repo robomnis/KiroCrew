@@ -646,3 +646,276 @@ class TestTheWriteIsLockedAndOffLoop:
         )
         assert resp.status == 200, "an absent per-workspace map must be created"
         assert _doc(store)["workspaces"] == {"other": {"k": "v"}, "ops": {"q": "1"}}
+
+
+def _write_ws_env(text: str, workspace: str = "ops") -> Path:
+    """Write a per-workspace dotenv file where the endpoint will look for it."""
+    path = vstore.workspace_env_path(workspace)
+    assert path is not None
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    vstore.invalidate_cache()
+    return path
+
+
+class TestTheReadSideReportsTheFileLayer:
+    """The dotenv layer is read-only here, but it has to be VISIBLE.
+
+    A file-defined key that a panel key shadows would otherwise look like the panel
+    edit had no effect, and a value the operator cannot see is a value they cannot
+    debug.
+    """
+
+    async def test_the_file_pairs_are_reported_per_workspace(self, wired):
+        _write_ws_env("fromFile=yes\n")
+        view = json.loads((await vh.api_variables(_request("GET"))).body)
+        assert view["workspace_files"]["ops"] == {"fromFile": "yes"}
+
+    async def test_a_workspace_with_no_file_reports_an_empty_map(self, wired):
+        view = json.loads((await vh.api_variables(_request("GET"))).body)
+        assert view["workspace_files"]["default"] == {}
+
+    async def test_only_configured_workspaces_are_reported(self, wired):
+        """Keyed off the CONFIG's names, like the editable maps beside it, so a stale
+        file for a deleted workspace is not advertised."""
+        _write_ws_env("x=1", workspace="deleted-ws")
+        view = json.loads((await vh.api_variables(_request("GET"))).body)
+        assert set(view["workspace_files"]) == {"default", "ops"}
+
+    async def test_the_directory_is_reported_so_the_panel_can_name_it(self, wired):
+        view = json.loads((await vh.api_variables(_request("GET"))).body)
+        assert view["workspace_file_dir"].endswith("workspaces")
+
+    async def test_a_workspace_that_cannot_have_a_file_says_why(self, wired):
+        """Reported so the panel can say it, rather than showing no rows and leaving
+        the reason in a log."""
+        cfg, _ = wired
+        cfg.workspaces["Ops"] = cfg.workspaces["ops"]
+        view = json.loads((await vh.api_variables(_request("GET"))).body)
+        assert view["workspace_file_blocked"]["Ops"] == "name_not_lowercase"
+
+    async def test_a_workspace_that_can_have_one_is_absent_from_the_map(self, wired):
+        view = json.loads((await vh.api_variables(_request("GET"))).body)
+        assert "ops" not in view["workspace_file_blocked"]
+
+    async def test_the_file_layer_is_not_offered_as_editable(self, wired):
+        """`workspace_files` must not leak into the editable maps: this endpoint does
+        not write those files, and reporting them as editable is what let an earlier
+        revision show a pair it did not own."""
+        _write_ws_env("fromFile=yes\n")
+        view = json.loads((await vh.api_variables(_request("GET"))).body)
+        assert "fromFile" not in view["workspaces"]["ops"]
+        assert "fromFile" not in view["global"]
+
+
+class TestBulkEdit:
+    """A whole scope pasted as dotenv text, applied as a per-key diff."""
+
+    async def test_a_paste_sets_every_pair(self, wired):
+        _, store = wired
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "A=1\nB=two\n", "base_keys": []})
+        )
+        assert resp.status == 200
+        assert _doc(store)["global"] == {"A": "1", "B": "two"}
+
+    async def test_a_key_absent_from_the_paste_is_deleted(self, wired):
+        """Bulk edit is a whole-scope statement: what is not in the text is gone.
+        Expressed as a per-key diff so deletion stays absence, with no second verb."""
+        _, store = wired
+        _seed(store, {"global": {"keep": "1", "drop": "2"}})
+        await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "keep=1\n", "base_keys": ["keep", "drop"]})
+        )
+        assert _doc(store)["global"] == {"keep": "1"}
+
+    async def test_another_scope_is_untouched(self, wired):
+        _, store = wired
+        _seed(store, {"global": {"g": "1"}, "workspaces": {"ops": {"w": "2"}}})
+        await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "g=changed\n", "base_keys": ["g"]})
+        )
+        doc = _doc(store)
+        assert doc["global"] == {"g": "changed"}
+        assert doc["workspaces"]["ops"] == {"w": "2"}, "a sibling scope was rewritten"
+
+    async def test_a_key_added_since_the_editor_opened_refuses_the_write(self, wired):
+        """The clobber the per-key PUT was built to delete, arriving through the one
+        verb that still speaks for a whole scope.
+
+        Tab B adds a key; Tab A, whose editor opened before that, applies text that
+        does not mention it. Without the baseline check A's apply deletes B's key --
+        and A never saw it, so nothing on A's screen could have warned them.
+        """
+        _, store = wired
+        _seed(store, {"global": {"a": "1", "added_by_tab_b": "2"}})
+
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "a=1\n", "base_keys": ["a"]})
+        )
+
+        assert resp.status == 409
+        assert json.loads(resp.body)["code"] == "variables_stale_bulk_base"
+        assert _doc(store)["global"] == {"a": "1", "added_by_tab_b": "2"}, "the write landed"
+
+    async def test_a_key_deleted_since_the_editor_opened_also_refuses(self, wired):
+        """The other direction: the operator is looking at a key that no longer
+        exists, so their text would resurrect it."""
+        _, store = wired
+        _seed(store, {"global": {"a": "1"}})
+
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "a=1\nb=2\n", "base_keys": ["a", "b"]})
+        )
+
+        assert resp.status == 409
+        assert json.loads(resp.body)["code"] == "variables_stale_bulk_base"
+
+    async def test_a_changed_VALUE_does_not_refuse(self, wired):
+        """Compared on the key SET, deliberately. Overwriting values is what a bulk
+        edit is for -- that is what the operator is looking at and intends. A key
+        appearing or vanishing underneath them is the part they have not seen."""
+        _, store = wired
+        _seed(store, {"global": {"a": "changed-by-tab-b"}})
+
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "a=mine\n", "base_keys": ["a"]})
+        )
+
+        assert resp.status == 200
+        assert _doc(store)["global"] == {"a": "mine"}
+
+    async def test_the_baseline_order_does_not_matter(self, wired):
+        _, store = wired
+        _seed(store, {"global": {"a": "1", "b": "2"}})
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "a=1\nb=2\n", "base_keys": ["b", "a"]})
+        )
+        assert resp.status == 200
+
+    async def test_a_bulk_write_without_a_baseline_is_refused(self, wired):
+        """Refused rather than defaulted: a client that omits it would get the
+        destructive path for free, which is the whole hazard."""
+        _, store = wired
+        _seed(store, {"global": {"a": "1", "other": "2"}})
+
+        resp = await vh.api_variables(_request("PUT", {"scope": "global", "bulk": "a=1\n"}))
+
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "variables_invalid_values"
+        assert _doc(store)["global"] == {"a": "1", "other": "2"}
+
+    async def test_a_malformed_baseline_is_refused(self, wired):
+        for bad in ("not-a-list", [1, 2], {"a": 1}):
+            resp = await vh.api_variables(
+                _request("PUT", {"scope": "global", "bulk": "a=1", "base_keys": bad})
+            )
+            assert resp.status == 400
+            assert json.loads(resp.body)["code"] == "variables_invalid_values"
+
+    async def test_the_baseline_is_not_required_for_a_per_key_write(self, wired):
+        """`set`/`delete` name their own keys, so they cannot delete one nobody
+        mentioned -- the guard belongs to `bulk` alone."""
+        _, store = wired
+        resp = await vh.api_variables(_request("PUT", {"scope": "global", "set": {"a": "1"}}))
+        assert resp.status == 200
+
+    async def test_the_deletion_set_is_computed_from_the_STORE_not_the_client(self, wired):
+        """The diff is computed against the STORE, not a client-supplied snapshot.
+
+        The baseline check above is what stops a stale editor reaching here at all;
+        this pins the other half, which still matters once it passes: the deletions
+        are derived from what is actually stored, so the write cannot be steered by a
+        client that reports its own idea of the current keys.
+        """
+        _, store = wired
+        _seed(store, {"global": {"a": "1", "added_by_someone_else": "2"}})
+        await vh.api_variables(
+            _request(
+                "PUT",
+                {"scope": "global", "bulk": "a=1\n", "base_keys": ["a", "added_by_someone_else"]},
+            )
+        )
+        assert _doc(store)["global"] == {"a": "1"}
+
+    async def test_a_workspace_scope_bulk_targets_that_workspace(self, wired):
+        _, store = wired
+        resp = await vh.api_variables(
+            _request(
+                "PUT", {"scope": "workspace", "workspace": "ops", "bulk": "w=1\n", "base_keys": []}
+            )
+        )
+        assert resp.status == 200
+        assert _doc(store)["workspaces"]["ops"] == {"w": "1"}
+
+    async def test_an_empty_paste_clears_the_scope(self, wired):
+        _, store = wired
+        _seed(store, {"global": {"a": "1"}})
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "", "base_keys": ["a"]})
+        )
+        assert resp.status == 200
+        assert _doc(store)["global"] == {}
+
+    async def test_a_malformed_line_refuses_the_whole_write(self, wired):
+        """STRICT here, unlike the same parser reading a file: the operator is looking
+        at the text, so the fixable moment is now. Partial application would leave the
+        scope in a state the text they are staring at does not describe."""
+        _, store = wired
+        _seed(store, {"global": {"untouched": "1"}})
+        resp = await vh.api_variables(
+            _request(
+                "PUT", {"scope": "global", "bulk": "GOOD=1\nnonsense\n", "base_keys": ["untouched"]}
+            )
+        )
+        assert resp.status == 400
+        payload = json.loads(resp.body)
+        assert payload["code"] == "variables_invalid_bulk"
+        assert payload["line"] == 2, "the refusal names the offending line"
+        assert _doc(store)["global"] == {"untouched": "1"}, "a refused write changed the store"
+
+    async def test_a_refused_pair_names_its_line(self, wired):
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "A=1\nSTOP_FILE=/tmp/x\n", "base_keys": []})
+        )
+        assert resp.status == 400
+        assert json.loads(resp.body)["line"] == 2
+
+    async def test_bulk_cannot_be_combined_with_set_or_delete(self, wired):
+        """They describe the scope two different ways; applying both would make the
+        result depend on which ran last."""
+        for extra in ({"set": {"a": "1"}}, {"delete": ["a"]}):
+            resp = await vh.api_variables(
+                _request("PUT", {"scope": "global", "bulk": "a=1", "base_keys": [], **extra})
+            )
+            assert resp.status == 400
+            assert json.loads(resp.body)["code"] == "variables_conflicting_change"
+
+    async def test_bulk_must_be_a_string(self, wired):
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": {"a": "1"}, "base_keys": []})
+        )
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "variables_invalid_values"
+
+    async def test_a_body_with_none_of_the_three_verbs_is_refused(self, wired):
+        resp = await vh.api_variables(_request("PUT", {"scope": "global"}))
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "variables_invalid_values"
+
+    async def test_an_unknown_workspace_is_refused_before_the_write(self, wired):
+        resp = await vh.api_variables(
+            _request(
+                "PUT", {"scope": "workspace", "workspace": "nope", "bulk": "a=1", "base_keys": []}
+            )
+        )
+        assert resp.status == 400
+        assert json.loads(resp.body)["code"] == "variables_unknown_workspace"
+
+    async def test_the_response_carries_the_refreshed_view(self, wired):
+        resp = await vh.api_variables(
+            _request("PUT", {"scope": "global", "bulk": "a=1\n", "base_keys": []})
+        )
+        payload = json.loads(resp.body)
+        assert payload["ok"] is True
+        assert payload["global"] == {"a": "1"}
