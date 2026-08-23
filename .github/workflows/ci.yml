@@ -404,6 +404,16 @@ jobs:
       - name: Check formatting (black, baselined)
         run: python3 scripts/check_black_formatting.py
 
+      # A secret-bearing file must be locked down BEFORE any content reaches it:
+      # a post-publish lockdown leaves the payload at its final path under the
+      # inherited DACL, which on Windows is not covered by atomic_write's POSIX
+      # mode at all. #5307 converted the last seven such writers; this keeps a
+      # new one from reintroducing the shape. Known-unconverted sites live in
+      # KNOWN_UNCONVERTED in the script, keyed to an open issue, and that list is
+      # shrink-only -- a paid-off entry fails the gate until it is deleted.
+      - name: Check lockdown-before-publish (secret writers)
+        run: python3 scripts/check_lockdown_before_publish.py
+
       # isort/flake8/mypy below are BLOCKING (config in pyproject.toml + setup.cfg).
       #
       # The two repo-root modules are named explicitly: `src/kiro_crew test` misses
