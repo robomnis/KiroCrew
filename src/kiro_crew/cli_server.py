@@ -950,12 +950,20 @@ def _restart(cli_port: int | None = None) -> None:
     _print_token_url(port)
 
 
-def _update() -> None:
+def _update(force: bool = False) -> None:
     """Update Kiro Crew — dispatches based on install layout.
 
     Three install layouts, three update paths:
 
     * **git checkout** — fetch + reset --hard + rebuild (existing path).
+      The reset only runs for a FAST-FORWARDABLE checkout (behind its
+      upstream, not ahead). A checkout that has DIVERGED (committed local
+      work both ahead of and behind ``origin/<branch>``) is refused: the
+      hard reset would discard the local commits, and the tracked-change
+      prompt only covers uncommitted edits. ``force=True`` (the ``--force``
+      CLI flag) is the explicit opt-in that lets the reset discard them.
+      An ahead-only checkout has nothing to pull and is reported as up to
+      date without resetting.
     * **wheel / cli.sh** — fetch the release feed, compare versions, and
       re-run the installer if newer. This is the path that was missing and
       caused the ``KIROCREW_PROJECT_DIR not set`` error for cli.sh installs.
@@ -1061,6 +1069,59 @@ def _update() -> None:
     if diff_result.returncode == 0:
         print("\n✅ Already up to date!")
         return
+
+    # Divergence guard. The hard reset below discards local COMMITTED work,
+    # and the tracked-change prompt after this only sees uncommitted edits —
+    # a checkout carrying its own commits passes that prompt silently.
+    # Mirror the dashboard check's verdict: only a fast-forwardable checkout
+    # (behind and not ahead) proceeds to the reset; ahead-only has nothing to
+    # pull and returns without resetting; true divergence refuses unless the
+    # operator explicitly opted in with --force. Counted against
+    # origin/<branch> — the exact ref the reset targets, freshly updated by
+    # the fetch above.
+    count_result = subprocess.run(
+        ["git", "rev-list", "--count", "--left-right", f"HEAD...origin/{branch}"],
+        cwd=proj,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    # ``--left-right`` with the three-dot range prints "<ahead>\t<behind>":
+    # left is reachable from HEAD only, right from origin/<branch> only.
+    ahead = behind = -1
+    if count_result.returncode == 0:
+        try:
+            ahead_text, behind_text = count_result.stdout.split()
+            ahead, behind = int(ahead_text), int(behind_text)
+        except ValueError:
+            pass
+    if ahead < 0 or behind < 0:
+        # Fail closed: a guard that cannot count must not wave a destructive
+        # reset through — an unreadable comparison is exactly the state in
+        # which committed work would be lost silently.
+        print(f"  ❌ Could not compare HEAD against origin/{branch}:")
+        print(f"     {count_result.stderr.strip() or count_result.stdout.strip()}")
+        sys.exit(1)
+    if behind == 0:
+        # Nothing to pull: origin/<branch> is an ancestor of HEAD, so the hard
+        # reset could only REMOVE local commits and can never bring anything
+        # in. The dashboard check reports the same state as no update
+        # available, so the destructive step is unreachable here — even under
+        # --force, which exists to let a real update discard diverged work,
+        # not to delete commits when there is nothing to update to.
+        suffix = f" ({ahead} local commit(s) ahead of origin/{branch})" if ahead else ""
+        print(f"\n✅ Already up to date!{suffix}")
+        return
+    if ahead > 0:
+        if not force:
+            print(f"  ⚠️  This checkout has diverged from origin/{branch}:")
+            print(f"      {ahead} local commit(s) not on origin/{branch}, {behind} behind.")
+            print("  A hard reset would discard the local commits. Reconcile instead:")
+            print(f"      git rebase origin/{branch}    (or: git merge origin/{branch})")
+            print("  Or discard the local commits explicitly:")
+            print("      kirocrew update --force")
+            sys.exit(1)
+        print(f"  ⚠️  --force: discarding {ahead} local commit(s) not on origin/{branch}.")
 
     # Warn about local tracked-file changes before discarding
     status = subprocess.run(
