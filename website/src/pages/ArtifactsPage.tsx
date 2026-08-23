@@ -43,6 +43,8 @@ import type { Artifact, ArtifactFolder, PublishProviderDescriptor, RemoteArtifac
 
 import { i18nT } from '../i18n/t'
 import { FOLDER_COLOR_PALETTE } from '../components/folderColorCatalog'
+import { useSandboxDoc } from '../hooks/useSandboxDoc'
+import { useNearViewport } from '../hooks/useNearViewport'
 /** Read the current computed theme CSS vars (capped to the known set, each
  * value sanitized) so a sandboxed preview iframe matches the dashboard theme.
  * Mirrors the helper in ArtifactDetailPage. */
@@ -233,7 +235,6 @@ function WidgetThumb({ content, slug }: { content: string; slug: string }) {
     () => (content ? buildSrcdoc({ html: content, themeVars, mode: theme, includeHeightReporter: true }) : null),
     [content, themeVars, theme],
   )
-  const [blobUrl, setBlobUrl] = useState<string | null>(null)
   // Reserve the height this content had last time, or the median of thumbnails
   // already measured, before falling back to the viewport ceiling.
   //
@@ -264,13 +265,16 @@ function WidgetThumb({ content, slug }: { content: string; slug: string }) {
     return () => ro.disconnect()
   }, [])
 
-  useEffect(() => {
-    if (!srcdoc) return
-    const blob = new Blob([srcdoc], { type: 'text/html;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    setBlobUrl(url)
-    return () => URL.revokeObjectURL(url)
-  }, [srcdoc])
+  // A gateway-served document, not a `blob:` URL — the same reason the artifact
+  // and widget frames moved: some WebKit-based in-app browsers refuse a blob
+  // load outright and can take the whole page down with it.
+  const near = useNearViewport(wrapRef)
+  // Mint only once the thumb is near the viewport. A gallery renders every card
+  // it has, and minting for all of them at once pushes a pile of documents the
+  // gateway has to hold in flight simultaneously — with image-bearing artifacts
+  // that is megabytes, and the stash then has to refuse mints it could otherwise
+  // have served. Deferring keeps the pressure proportional to what is on screen.
+  const { url: blobUrl, failed } = useSandboxDoc(near ? srcdoc : null)
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -336,6 +340,16 @@ function WidgetThumb({ content, slug }: { content: string; slug: string }) {
             transformOrigin: 'top left',
           }}
         />
+      ) : failed ? (
+        /* A static muted thumb, NOT the pulse: `animate-pulse` asserts progress,
+           and after a failed mint nothing is in flight. Repeated across a grid an
+           endless pulse reads as a hung page rather than a failed card. The card
+           itself is the retry affordance — opening the artifact mints again. */
+        <div className="h-full bg-bg-elevated flex items-center justify-center p-2">
+          <span className="text-[11px] text-muted text-center leading-tight">
+            {i18nT('components.artifactBody.could_not_render')}
+          </span>
+        </div>
       ) : (
         <div className="h-full bg-bg-elevated animate-pulse" />
       )}

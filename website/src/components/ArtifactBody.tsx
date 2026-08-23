@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { Download, Image as ImageIcon, ImageOff } from 'lucide-react'
+import { Download, Image as ImageIcon, ImageOff, RotateCw } from 'lucide-react'
 import { useTheme } from '../hooks/useTheme'
+import { useSandboxDoc } from '../hooks/useSandboxDoc'
 import { useCommentBridge, type IframeSelection } from '../hooks/useCommentBridge'
 import { InlineCommentOverlay } from './InlineCommentOverlay'
 import { sanitizeCssValue } from '../lib/cssSanitize'
@@ -173,20 +174,11 @@ export const ArtifactBodyIframe = memo(function ArtifactBodyIframe({
     () => artifact.content ? buildSrcdoc({ html: artifact.content, themeVars, mode: theme, enableComments: true }) : null,
     [artifact.content, themeVars, theme],
   )
-  const [blobUrl, setBlobUrl] = useState<string | null>(null)
-  useEffect(() => {
-    // Clear the stale blob URL when srcdoc goes falsy (e.g. artifact.content
-    // empties while the panel is open); the cleanup below revokes the old URL,
-    // so leaving blobUrl set would point the iframe at a dead blob.
-    if (!srcdoc) {
-      setBlobUrl(null)
-      return
-    }
-    const blob = new Blob([srcdoc], { type: 'text/html;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    setBlobUrl(url)
-    return () => URL.revokeObjectURL(url)
-  }, [srcdoc])
+  // One shared hook rather than this effect in four components: the previous
+  // document survives both an in-flight and a failed re-mint, and `failed`
+  // clears when a retry starts. See hooks/useSandboxDoc.ts for why each rule
+  // exists.
+  const { url: blobUrl, failed, retry } = useSandboxDoc(srcdoc)
   // Bridge: push anchored highlights into the iframe, surface in-iframe text
   // selections (-> popover) and highlight clicks (-> flash the sidebar row).
   const { scrollToAnchor, onIframeLoad } = useCommentBridge({
@@ -200,7 +192,20 @@ export const ArtifactBodyIframe = memo(function ArtifactBodyIframe({
     // ArtifactBodyNative); otherwise the hardcoded minHeight forces 480px and
     // overflows the panel's flex container. Falls back to the 480 default
     // merged with the full-page reading-width previewStyle (max-width).
-    <div className="rounded-xl border border-border bg-card overflow-hidden" style={heightStyle ?? { minHeight: 480, ...previewStyle }}>
+    <div className="relative rounded-xl border border-border bg-card overflow-hidden" style={heightStyle ?? { minHeight: 480, ...previewStyle }}>
+      {/* Overlaid, not stacked: the wrapper is a fixed height with
+          overflow-hidden, so a notice in the flow pushes the document down and
+          clips its bottom edge. A failed re-mint keeps the document that is
+          still rendering fine, so this sits ON it rather than displacing it. */}
+      {failed && (
+        <div className="absolute top-0 left-0 right-0 z-10 px-6 py-3 flex items-center gap-3 text-text bg-bg-elevated/95 border-b border-border">
+          <span>{i18nT('components.artifactBody.could_not_render')}</span>
+          <button type="button" className="btn btn-sm" onClick={retry}>
+            <RotateCw className="lucide-inline" />
+            {i18nT('components.artifactBody.retry')}
+          </button>
+        </div>
+      )}
       {blobUrl ? (
         <iframe
           ref={iframeRef}
@@ -212,7 +217,9 @@ export const ArtifactBodyIframe = memo(function ArtifactBodyIframe({
           title={i18nT('components.artifactBody.artifact', { slug })}
         />
       ) : (
-        <div className="p-6 text-muted">{i18nT('components.artifactBody.rendering')}</div>
+        !failed && (
+          <div className="p-6 text-muted">{i18nT('components.artifactBody.rendering')}</div>
+        )
       )}
     </div>
   )
