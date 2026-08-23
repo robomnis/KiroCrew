@@ -321,3 +321,170 @@ def test_the_pause_is_read_for_the_role_the_turn_arrived_on(monkeypatch) -> None
         )
     )
     assert mirrored.pause_calls == [("dashboard:chat-1", False)], "a mirror reads the mirror flag"
+
+
+class _RecordingCtxBuilder:
+    """Captures the kwargs the pipeline hands ``build_message``.
+
+    The signature is spelled out rather than swallowed into ``**kw`` for
+    ``minimal_context``, so a pipeline that stops forwarding it fails here
+    instead of quietly falling back to the builder's own default.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def build_message(self, text, is_new, session_key, *, minimal_context=False, **kw):
+        self.calls.append({"minimal_context": minimal_context, **kw})
+        return text, None
+
+
+def _turn_minimal(renderer: Any, *, minimal_context: bool) -> ChannelTurn:
+    return ChannelTurn(
+        channel_type="weixin",
+        session_key="weixin:agentA:direct:userA",
+        conversation_id="weixin:userA",
+        agent="agentA",
+        user_text="hi",
+        renderer=renderer,
+        approval_mode="auto",
+        minimal_context=minimal_context,
+    )
+
+
+def test_minimal_context_reaches_build_message(monkeypatch) -> None:
+    """A non-operator's turn must be assembled WITHOUT the operator's context.
+
+    The exposure is in the PROMPT: memory, lessons, skills and prior history are
+    injected before any tool runs, so denying the sender's tools does not stop the
+    operator's private notes from being quoted back to an admitted peer. The
+    pipeline is the only place that calls ``build_message``, so a flag it drops is
+    a flag no channel can set.
+    """
+    _patch_pipeline(monkeypatch)
+    ctx = _RecordingCtxBuilder()
+
+    asyncio.run(
+        drive_turn(
+            _turn_minimal(_Renderer(), minimal_context=True),
+            sessions=_Sessions(),
+            ctx_builder=ctx,
+        )
+    )
+
+    assert ctx.calls, "build_message was never called"
+    assert ctx.calls[0]["minimal_context"] is True, (
+        "the pipeline dropped minimal_context, so the peer's turn was built with "
+        "the operator's memory, lessons, skills and history"
+    )
+
+
+def test_the_default_turn_still_gets_full_context(monkeypatch) -> None:
+    """The non-vacuity half: the default must stay byte-identical for adopters.
+
+    Without this, hardcoding ``minimal_context=True`` in the pipeline would pass
+    the test above while stripping every existing channel's context.
+    """
+    _patch_pipeline(monkeypatch)
+    ctx = _RecordingCtxBuilder()
+
+    asyncio.run(
+        drive_turn(
+            _turn(_Renderer()),  # constructed without naming the field at all
+            sessions=_Sessions(),
+            ctx_builder=ctx,
+        )
+    )
+
+    assert ctx.calls[0]["minimal_context"] is False
+
+
+class _GovernanceStub:
+    """Records what the shared gate asked governance, and answers a fixed verdict."""
+
+    def __init__(self, permitted: bool) -> None:
+        self.permitted = permitted
+        self.asked: list[str] = []
+
+    async def __call__(self, channel_type: str) -> bool:
+        self.asked.append(channel_type)
+        return self.permitted
+
+
+def _gate(monkeypatch, *, permitted: bool) -> _GovernanceStub:
+    stub = _GovernanceStub(permitted)
+    monkeypatch.setattr(D, "channel_inbound_permitted", stub)
+    return stub
+
+
+class TestPureCancelPredicate:
+    """PURE is what makes the governance exemption safe to grant."""
+
+    def test_every_channel_spelling_is_recognised(self) -> None:
+        for text in ("/stop", "/cancel", "!stop", "!cancel"):
+            assert D.is_pure_cancel(text), text
+            assert D.is_pure_cancel(f"  {text.upper()}  "), text
+
+    def test_an_attachment_makes_it_impure(self) -> None:
+        """The channel fetches media AFTER authorizing, so this is the leak edge."""
+        assert D.is_pure_cancel("/stop", has_attachments=True) is False
+
+    def test_anything_beyond_the_word_is_an_ordinary_message(self) -> None:
+        for text in (
+            "/stop please",
+            "please /stop",
+            "/stopwatch",
+            "/restart",
+            "!restart",
+            "stop",
+            "",
+        ):
+            assert D.is_pure_cancel(text) is False, text
+
+    def test_the_shared_set_covers_the_channel_command_tables(self) -> None:
+        """Drift tripwire: a channel alias the shared gate does not know is a hole."""
+        from kiro_crew.discord.commands import _STOP_ALIASES as discord_aliases
+        from kiro_crew.telegram.commands import _STOP_ALIASES as telegram_aliases
+
+        missing = (set(discord_aliases) | set(telegram_aliases)) - D._CANCEL_ALIASES
+        assert not missing, f"cancel spellings the shared exemption would gate: {missing}"
+
+
+class TestCancellationSurvivesAGovernanceDeny:
+    """A denied channel must still be able to halt the session it started.
+
+    ``max_buttons=0`` channels have no Reject button to press, so the typed cancel
+    is the only cancel affordance there is: gating it strands a runaway turn with
+    no way to stop it, which is the opposite of what a deny is for.
+    """
+
+    def test_a_pure_cancel_is_permitted_on_a_denied_channel(self, monkeypatch) -> None:
+        _gate(monkeypatch, permitted=False)
+        assert asyncio.run(D.inbound_permitted("whatsapp", text="/stop")) is True
+
+    def test_an_ordinary_message_is_still_dropped(self, monkeypatch) -> None:
+        """Non-vacuity: the deny must still deny everything that is not a cancel."""
+        _gate(monkeypatch, permitted=False)
+        assert asyncio.run(D.inbound_permitted("whatsapp", text="summarise my inbox")) is False
+
+    def test_a_restart_is_not_a_cancellation(self, monkeypatch) -> None:
+        _gate(monkeypatch, permitted=False)
+        assert asyncio.run(D.inbound_permitted("whatsapp", text="/restart")) is False
+
+    def test_an_attachment_bearing_cancel_is_gated(self, monkeypatch) -> None:
+        """Otherwise the denied channel still pays for the download."""
+        _gate(monkeypatch, permitted=False)
+        assert (
+            asyncio.run(D.inbound_permitted("whatsapp", text="/stop", has_attachments=True))
+            is False
+        )
+
+    def test_the_argument_less_call_stays_strict(self, monkeypatch) -> None:
+        """``drive_turn``'s backstop names no text, so nothing is exempt there."""
+        _gate(monkeypatch, permitted=False)
+        assert asyncio.run(D.inbound_permitted("whatsapp")) is False
+
+    def test_a_permitted_channel_still_short_circuits(self, monkeypatch) -> None:
+        stub = _gate(monkeypatch, permitted=True)
+        assert asyncio.run(D.inbound_permitted("whatsapp", text="anything")) is True
+        assert stub.asked == ["whatsapp"], "governance must be consulted first, once"

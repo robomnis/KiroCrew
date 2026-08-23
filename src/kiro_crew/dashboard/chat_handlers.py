@@ -5157,12 +5157,14 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         if slot_key and slot_key in state._slots:
             state._slots[slot_key]._trust = False
             state._slots[slot_key]._trust_reads = True
-            state.sessions.set_approval_policy(f"dashboard:{slot_key}", "")
+            state.sessions.set_approval_policy(
+                effective_session_key(state._slots[slot_key]), ""
+            )
         else:
             for slot in state._slots.values():
                 slot._trust = False
                 slot._trust_reads = True
-                state.sessions.set_approval_policy(f"dashboard:{slot.key}", "")
+                state.sessions.set_approval_policy(effective_session_key(slot), "")
         try:
             sel().log_api_access(
                 caller="dashboard:mode",
@@ -5178,7 +5180,9 @@ async def api_chat_mode(request: web.Request) -> web.Response:
             if slot_key not in state._slots:
                 return web.json_response({"ok": False, "error": "unknown slot"}, status=400)
             state._slots[slot_key]._trust = True
-            state.sessions.set_approval_policy(f"dashboard:{slot_key}", "auto")
+            state.sessions.set_approval_policy(
+                effective_session_key(state._slots[slot_key]), "auto"
+            )
             linked_ch = getattr(state._slots[slot_key], "_slack_channel", None)
             if mgr and linked_ch and linked_ch in mgr._channels:
                 mgr._channels[linked_ch].trusted = True
@@ -5186,7 +5190,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         else:
             for slot in state._slots.values():
                 slot._trust = True
-                state.sessions.set_approval_policy(f"dashboard:{slot.key}", "auto")
+                state.sessions.set_approval_policy(effective_session_key(slot), "auto")
             if mgr:
                 for ch in mgr._channels.values():
                     ch.trusted = True
@@ -5211,7 +5215,9 @@ async def api_chat_mode(request: web.Request) -> web.Response:
                 return web.json_response({"ok": False, "error": "unknown slot"}, status=400)
             state._slots[slot_key]._trust = False
             state._slots[slot_key]._trust_reads = False
-            state.sessions.set_approval_policy(f"dashboard:{slot_key}", "")
+            state.sessions.set_approval_policy(
+                effective_session_key(state._slots[slot_key]), ""
+            )
             linked_ch = getattr(state._slots[slot_key], "_slack_channel", None)
             if mgr and linked_ch and linked_ch in mgr._channels:
                 mgr._channels[linked_ch].trusted = False
@@ -5220,7 +5226,7 @@ async def api_chat_mode(request: web.Request) -> web.Response:
             for slot in state._slots.values():
                 slot._trust = False
                 slot._trust_reads = False
-                state.sessions.set_approval_policy(f"dashboard:{slot.key}", "")
+                state.sessions.set_approval_policy(effective_session_key(slot), "")
             if mgr:
                 for ch in mgr._channels.values():
                     ch.trusted = False
@@ -5296,9 +5302,17 @@ async def api_chat_mode(request: web.Request) -> web.Response:
                             )
 
     # Propagate trust/yolo to session approval policies so subagents inherit.
+    #
+    # Keyed by ``effective_session_key`` — the SAME derivation every grant above
+    # and the approval-card grants in ``api_chat_slot_approve`` use — because a
+    # grant and its revoke must address one key. A channel-surfaced or cron-born
+    # slot runs its turns under ``linked_session_key``, which is what
+    # ``messaging.approval.TextApprovalDecider.trusted()`` reads, so keying by
+    # the slot name writes a session nobody consults and leaves the live one
+    # holding whatever it was last granted: an un-revokable auto-approve.
     for slot in state._slots.values():
         policy = "auto" if slot._trust or safety_override().is_active() else ""
-        state.sessions.set_approval_policy(f"dashboard:{slot.key}", policy)
+        state.sessions.set_approval_policy(effective_session_key(slot), policy)
 
     state.push_slots_update()
     return web.json_response({"ok": True, "mode": mode})
@@ -5362,7 +5376,7 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
                 cand = s._approval_futures.get(request_id)
                 if not cand or cand.done():
                     continue
-                cand_session = s.linked_session_key or _history_key_for(s.key)
+                cand_session = effective_session_key(s)
                 if cand_session != want_session:
                     continue
                 owner, fut = s, cand
@@ -5374,14 +5388,15 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
         else:
             fut = None
     # Trust: auto-approve remaining tools for this slot. The approval policy MUST
-    # be keyed by the OWNER's EFFECTIVE session key — a linked cron/workflow slot
-    # runs under ``linked_session_key``, not ``dashboard:{key}``, so writing the
-    # raw slot key would leave the running session on its old policy and the trust
-    # decision would silently not take (mirrors the _run_chat session-key derivation).
+    # be keyed by the OWNER's EFFECTIVE session key — a linked cron/workflow or
+    # channel-surfaced slot runs under ``linked_session_key``, not
+    # ``dashboard:{key}``, so writing the raw slot key would leave the running
+    # session on its old policy and the trust decision would silently not take.
+    # ``effective_session_key`` is the one derivation shared with ``api_chat_mode``'s
+    # grants AND revokes, so an off-switch always addresses the key a grant wrote.
     if action == "trust":
         owner._trust = True
-        owner_session = owner.linked_session_key or _history_key_for(owner.key)
-        state.sessions.set_approval_policy(owner_session, "auto")
+        state.sessions.set_approval_policy(effective_session_key(owner), "auto")
         action = "approved"
     # Trust-reads: auto-approve read-only bash commands for this slot
     # Defer setting _trust_reads until after the approval future is consumed
@@ -5423,9 +5438,9 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
             )
         for s in state._slots.values():
             # Same effective-session-key rule as the single-slot trust above: a
-            # linked cron/workflow slot runs under its linked_session_key.
-            s_session = s.linked_session_key or _history_key_for(s.key)
-            state.sessions.set_approval_policy(s_session, "auto")
+            # linked cron/workflow or channel-surfaced slot runs under its
+            # linked_session_key.
+            state.sessions.set_approval_policy(effective_session_key(s), "auto")
         action = "approved"
     resolved = action if action in ("approved", "approved_trust_reads") else "rejected"
     if not fut or fut.done():

@@ -189,6 +189,7 @@ class TestSessionResumeIsDeclaredOnlyWhereItIsHonoured:
         from kiro_crew.webex.transport import WEBEX_CAPABILITIES
         from kiro_crew.wecom.transport import WECOM_CAPABILITIES
         from kiro_crew.weixin.transport import WEIXIN_CAPABILITIES
+        from kiro_crew.whatsapp.transport import WHATSAPP_CAPABILITIES
 
         others = {
             "slack": SLACK_CAPABILITIES,
@@ -198,6 +199,7 @@ class TestSessionResumeIsDeclaredOnlyWhereItIsHonoured:
             "wecom": WECOM_CAPABILITIES,
             "weixin": WEIXIN_CAPABILITIES,
             "imessage": IMESSAGE_CAPABILITIES,
+            "whatsapp": WHATSAPP_CAPABILITIES,
         }
         claiming = [name for name, caps in others.items() if caps.supports_session_resume]
         assert claiming == [], (

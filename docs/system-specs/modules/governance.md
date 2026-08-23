@@ -892,7 +892,19 @@ ALLOWED turn in the channel could otherwise pull it into agent context), the
 `handle_message` keeps its own gate as defense-in-depth for its OTHER entry points
 (interaction re-dispatch, synthetic sends). **`!stop` (cancellation) is the sole
 exemption** — a denied channel must still be able to halt a runaway session it
-previously started; `!restart` is NOT cancellation and stays gated. The OPTIONS
+previously started; `!restart` is NOT cancellation and stays gated.
+
+The exemption is **channel-neutral**, not Slack-only. `messaging/dispatch.py`'s
+`inbound_permitted(channel_type, *, text, has_attachments)` carries it for every
+channel on the shared pipeline, via `is_pure_cancel()`. Two properties make it
+safe to state that broadly. The match is whole-message, so `/stop the presses`
+is an ordinary sentence rather than a cancel, and an ATTACHMENT-bearing message
+is never exempt: a channel that fetches media after authorization would
+otherwise let a denied channel trigger a download by attaching a file to the one
+word that skips the gate. Both arguments default to the gated behaviour, so a
+caller that does not pass them is unchanged. This matters most where the channel
+has no widgets: with `max_buttons=0` a typed `/stop` is the only cancel
+affordance the operator has. The OPTIONS
 Send / legacy-choice buttons are gated at dispatch BEFORE they edit/post the
 selection to the channel (their re-dispatched turn is gated too, but the message
 edit precedes it); the spent-marker `_done_` no-op posts nothing and stays exempt.

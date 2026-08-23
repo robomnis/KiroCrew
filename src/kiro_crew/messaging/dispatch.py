@@ -87,6 +87,39 @@ class ChannelTurn:
     """``None`` for channels with no interactive buttons (deny-by-default for
     INTERACTIVE mode; ``auto``/``trust`` still work)."""
 
+    minimal_context: bool = False
+    """Assemble the prompt WITHOUT the operator's private context.
+
+    ``ContextBuilder.build_message`` gates memory, lessons, skills and prior
+    conversation history on this, leaving date/time plus agent identity. Set it
+    for a turn driven by someone the channel admits but who is not its operator:
+    denying that sender's tools does not help, because the exposure is in the
+    PROMPT and is assembled before any tool runs, so the operator's memory and
+    profile can otherwise be quoted straight back to a peer.
+
+    Every channel that admits a non-owner (an allowlisted peer, an ``open`` DM
+    policy, a group member) has the same exposure, which is why the switch lives
+    on the shared seam rather than in one dispatcher. Defaults False, so every
+    existing adopter is byte-identical."""
+
+    deny_all_tools: bool = False
+    """Reject every tool this turn asks for, ahead of every auto-approve path.
+
+    For a turn driven by someone the channel does not trust as its operator. The
+    approval mode cannot express it: the PreToolUse hook may answer
+    ``auto_approve`` and a session carrying Trust short-circuits, both before the
+    interactive ladder is consulted. Defaults False, so every existing adopter is
+    byte-identical."""
+
+    auto_approve_session: Optional[Callable[[], bool]] = None
+    """``() -> bool``: this session already carries per-session Trust.
+
+    Passed straight to ``TurnDriver``, which has accepted it since it was
+    written but had no wire through this pipeline -- so a shared-pipeline
+    channel could offer a Trust choice and then re-ask on the very next tool.
+    ``None`` (the default) reproduces exactly today's behaviour for every
+    existing adopter."""
+
     persist: Optional[Callable[[str, str, bool], None]] = None
     """``(user_text, reply_text, is_new) -> None``, called off the event loop."""
 
@@ -104,14 +137,64 @@ class ChannelTurn:
     """SEL audit caller label; defaults to ``<channel_type>:unknown``."""
 
 
-async def inbound_permitted(channel_type: str) -> bool:
+#: Every spelling a channel accepts for "abort the running turn". The union of
+#: the per-channel command tables (``/stop`` and ``/cancel`` everywhere, plus
+#: Discord's ``!`` bang forms), owned here because the governance exemption below
+#: is channel-neutral and a channel cannot be trusted to hand it the right word.
+#: A channel that adds a cancel spelling adds it here too, or a denied channel
+#: loses its off-switch again.
+_CANCEL_ALIASES = frozenset(("/stop", "/cancel", "!stop", "!cancel"))
+
+
+def is_pure_cancel(text: str, *, has_attachments: bool = False) -> bool:
+    """Whether *text* is nothing but a cancellation, carrying nothing with it.
+
+    PURE is the load-bearing word, and it is why the match is exact rather than a
+    prefix or a search:
+
+    * **Whole message.** A cancel alias with anything else on the line is an
+      ordinary message that happens to start with one, and every channel's own
+      ``parse_command`` already matches only the whole message.
+    * **No attachments.** A channel fetches media AFTER it authorizes the message,
+      so exempting an attachment-bearing cancel would spend an authenticated
+      download, a transcription, and a ``channel_history`` write on a conversation
+      policy has denied -- the exact leak the gate exists to stop -- before any
+      turn is refused. Such a message is gated like any other.
+
+    Case- and whitespace-insensitive, matching the per-channel tables.
+    """
+    if has_attachments:
+        return False
+    return text.strip().lower() in _CANCEL_ALIASES
+
+
+async def inbound_permitted(
+    channel_type: str, *, text: str = "", has_attachments: bool = False
+) -> bool:
     """Per-message governance gate.
 
     Rechecked on every message (not just at connect) so a host-profile deny
     added while the transport is live stops dispatch without a restart. The
     pipeline calls this itself, so a channel cannot forget it.
+
+    A PURE cancellation is the one exemption, matching the native Slack route's
+    ``!stop`` carve-out: a denied channel must still be able to halt a runaway
+    session it previously STARTED, and on a channel with no interactive buttons
+    (``max_buttons=0``) the typed cancel is the only affordance there is, so
+    gating it makes the off-switch unreachable exactly when it is needed. Nothing
+    else is exempt -- a restart is not a cancellation.
+
+    Callers pass *text* and *has_attachments* only where a cancel can arrive: the
+    dispatcher's per-message entry, ahead of command parsing. The defaults leave
+    the gate strict, which is what keeps ``drive_turn``'s backstop a backstop -- a
+    cancel runs no turn, so it never reaches it.
     """
     if await channel_inbound_permitted(channel_type):
+        return True
+    if text and is_pure_cancel(text, has_attachments=has_attachments):
+        # Logged, not silent: an operator reading the trail needs to see that a
+        # governed-off channel was still allowed to stop its own session.
+        logger.info("%s cancellation allowed through a channels governance deny", channel_type)
         return True
     logger.info("%s inbound dropped: denied by channels governance policy", channel_type)
     return False
@@ -318,6 +401,7 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
             channel_id=turn.conversation_id,
             agent=turn.agent,
             resumed=resumed,
+            minimal_context=turn.minimal_context,
             runtime_source=turn.channel_type,
         )
 
@@ -326,6 +410,8 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
             renderer,
             approval_mode=turn.approval_mode,
             decider=turn.decider,
+            auto_approve_session=turn.auto_approve_session,
+            deny_all_tools=turn.deny_all_tools,
             auto_approve_tool=build_auto_approve(ctx_builder),
             tool_gate=build_tool_gate(ctx_builder, session_key=session_key, agent=turn.agent),
             directive_consumer=turn.directive_consumer,

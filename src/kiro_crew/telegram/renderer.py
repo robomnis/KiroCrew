@@ -1097,7 +1097,13 @@ class TelegramRenderer(Renderer):
         self._tool = self._last_tool
         await self._stream_live(force=True)
 
-    async def on_prompt_choice(self, options: list[dict[str, Any]], request_id: str | int) -> None:
+    async def on_prompt_choice(
+        self,
+        options: list[dict[str, Any]],
+        request_id: str | int,
+        tool_title: str = "",
+        tool_purpose: str = "",
+    ) -> None:
         # Approve/Deny as a SEPARATE message so ongoing streaming edits to the
         # answer bubble don't clobber the buttons. callback_data stays well
         # under Telegram's 64-byte cap (a:<request_id>:<1|0>); the callback
@@ -1111,7 +1117,10 @@ class TelegramRenderer(Renderer):
                 ]
             ]
         }
-        tool = self._last_tool or "this tool"
+        # The request's OWN title first: `_last_tool` is the last tool_call seen
+        # and is never cleared, so it names the previous tool for any permission
+        # that arrives without one of its own.
+        tool = tool_title or self._last_tool or "this tool"
         await self._client.send_message(
             self._chat_id,
             f"🔐 Approve `{tool}`?",

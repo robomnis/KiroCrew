@@ -390,7 +390,6 @@ src/kiro_crew/mcp_tools/spawn.py
 src/kiro_crew/mcp_tools/workflows.py
 src/kiro_crew/mcp_utils.py
 src/kiro_crew/messaging/attachments.py
-src/kiro_crew/messaging/driver.py
 src/kiro_crew/messaging/link.py
 src/kiro_crew/messaging/queue_receipt.py
 src/kiro_crew/metrics/http_metrics.py
@@ -1039,7 +1038,6 @@ test/test_merge_queued_messages.py
 test/test_message_provenance.py
 test/test_message_queue.py
 test/test_messaging_attachments.py
-test/test_messaging_driver.py
 test/test_messaging_link.py
 test/test_mochi_activity.py
 test/test_mochi_agent_policy.py

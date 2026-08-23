@@ -191,7 +191,7 @@ from kiro_crew.messaging.link import (
     channel_namespace_of,
     parse_session_key,
 )
-from kiro_crew.messaging.renderer import chunk_text
+from kiro_crew.messaging.split import split_markdown_safe
 from kiro_crew.messaging.transport import InboundMessage
 from kiro_crew.platform import boot_platform
 from kiro_crew.platform.context import (
@@ -267,6 +267,7 @@ if TYPE_CHECKING:
     from kiro_crew.webex.client import WebexClient
     from kiro_crew.wecom.client import WeComClient
     from kiro_crew.weixin.client import WeixinClient
+    from kiro_crew.whatsapp.client import WhatsAppClient
 
 
 async def _persist_turn_row(
@@ -1499,6 +1500,12 @@ class GatewayOrchestrator:
             cfg.weixin.enabled and self._weixin_token and self._weixin_account_id
         )
         self._weixin_client: "WeixinClient | None" = None
+        # WhatsApp (QR-linked personal account) — no credential: pairing state
+        # lives in the channel's session DB, created by the Settings QR flow.
+        # Enablement is config-only; maybe_start_whatsapp reports the missing
+        # optional dependency or an unpaired session via the status badge.
+        self._whatsapp_enabled = bool(cfg.whatsapp.enabled)
+        self._whatsapp_client: "WhatsAppClient | None" = None
         # Discord — the DISCORD_BOT_TOKEN credential (env/.env) overrides
         # cfg.discord.bot_token; all other settings come from the typed
         # cfg.discord dataclass (mirrors the Telegram block above).
@@ -2750,8 +2757,15 @@ class GatewayOrchestrator:
             # extra credential/token regexes apply, then split on the
             # channel's max message length, mirroring the cross-surface
             # mirror leg.
+            #
+            # Fence-safe, not fixed-width: a blind slice through a code block
+            # leaves part two with no opener, so every line in it reads as prose
+            # and a channel's dialect converter rewrites the `**`, `#` and `- `
+            # INSIDE the code. A sub-agent's diff or log dump is exactly that
+            # shape. The shared splitter seals each chunk with a synthetic closer
+            # and reopens the next with the original opener line.
             safe_text = redact_via_context(text)
-            parts = chunk_text(safe_text, transport.capabilities.max_message_chars)
+            parts = split_markdown_safe(safe_text, transport.capabilities.max_message_chars)
             for part in parts:
                 await transport.send_message(conversation_id, part, thread_id=resolved.thread_id)
         except Exception:
