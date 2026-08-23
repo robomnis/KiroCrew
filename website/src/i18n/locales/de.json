@@ -7924,6 +7924,7 @@
         "recovered_continuing": "Fortsetzung automatisch gesendet",
         "resuming_the_interrupted_turn": "unterbrochener Zug wird fortgesetzt",
         "safety_policy_continuing": "Sicherheitsrichtlinie hat den Aufruf blockiert · Fortsetzung automatisch gesendet",
+        "safety_policy_told_in_turn": "Sicherheitsrichtlinie hat den Aufruf blockiert · Agent wurde noch in diesem Zug begründet",
         "session_busy_continuing": "Sitzung beschäftigt · Fortsetzung automatisch gesendet",
         "subagents_finished": "Subagenten abgeschlossen",
         "system_notice": "Systemhinweis",

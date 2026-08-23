@@ -1629,6 +1629,51 @@ _SELF_PROTECTION_FLOOR_BY_ID: dict[str, str] = {
 }
 _SELF_PROTECTION_FLOOR_PATTERNS: frozenset[str] = frozenset(_SELF_PROTECTION_FLOOR_BY_ID.values())
 
+# Why a floor denial happened, in words, for the rules whose floor can fire on
+# input the catalog ``pattern`` provably does NOT match.
+#
+# The refusal's first line reports that pattern (see the floor branch in
+# ``is_denied``) so the reason and the SEL event still map back to a rule id.
+# That identifier is not an explanation, though, and for a floor hit it is a
+# misleading one: ``python -c "import kiro_crew"`` is denied by the argv floor,
+# while the pattern it names requires a ``token`` word the command does not
+# contain. A reader who trusts the line looks for the wrong thing — and the
+# refusal reason is now handed to the MODEL in-band on a tool deny
+# (``chat_runner._steer_policy_notice``), so a wrong explanation actively
+# misdirects the agent's next attempt rather than merely reading oddly in a log.
+#
+# Presentation only, on the refusal's SECOND line, which both consumers ignore:
+# ``RecoveryCard.tsx`` extracts the pattern with a per-line end-anchored regex
+# and the suite's ``_denied_by`` partitions on the first line's separator.
+_SELF_PROTECTION_FLOOR_NOTES: dict[str, str] = {
+    "credential-exfil-kirocrew-token": (
+        "Matched structurally on the command's argv, not by the pattern text above: "
+        "the product CLI is invoked to mint a dashboard token, or an inline "
+        "interpreter program imports it (an imported CLI can construct the token verb "
+        "itself, so the import is the gate and no 'token' word need appear)."
+    ),
+    "self-protection-kill": (
+        "Matched structurally on the command's argv, not by the pattern text above: "
+        "the command signals or kills this gateway's own process."
+    ),
+    "self-protection-restart": (
+        "Matched structurally on the command's argv, not by the pattern text above: "
+        "shell de-escaping resolves the command to a restart of this gateway."
+    ),
+    "self-protection-update": (
+        "Matched structurally on the command's argv, not by the pattern text above: "
+        "shell de-escaping resolves the command to a self-update."
+    ),
+    "self-protection-gateway-restart": (
+        "Matched structurally on the command's argv, not by the pattern text above: "
+        "shell de-escaping resolves the command to a gateway restart."
+    ),
+    "self-protection-cloud": (
+        "Matched structurally on the command's argv, not by the pattern text above: "
+        "shell de-escaping resolves the command to a destructive cloud operation."
+    ),
+}
+
 # The two INTERPRETER-payload rules.  They are ordinary regex-tier rules, but an
 # interpreter CONCATENATES adjacent string literals, so they are additionally matched
 # against a copy of the text with those joins collapsed.
@@ -9240,7 +9285,7 @@ def is_denied(
     """
     lower = tool_name.lower()
 
-    def _reason(matched: str) -> str:
+    def _reason(matched: str, note_override: str = "") -> str:
         """Refusal text for *matched*, with the operator note on a SECOND line.
 
         The first line is byte-for-byte what it has always been. That is load
@@ -9252,10 +9297,13 @@ def is_denied(
         goes on its own line, where both readers ignore it.
 
         Built-in rules never carry a note (the map holds user patterns only), so
-        for them this returns exactly the historical string.
+        for them this returns exactly the historical string — unless the caller
+        passes *note_override*, which the argv-structural floor uses to say why a
+        pattern the input does not literally match was still the rule that fired
+        (see ``_SELF_PROTECTION_FLOOR_NOTES``).
         """
         head = f"{DENY_REASON_PREFIX}{matched}"
-        note = (reason_notes or {}).get(matched, "").strip()
+        note = (note_override or (reason_notes or {}).get(matched, "")).strip()
         return f"{head}\n{note}" if note else head
 
     glob_patterns = list(extra_patterns or [])
@@ -9344,9 +9392,12 @@ def is_denied(
             continue
         if predicate(lower):
             # Report the rule's own pattern, exactly as the regex tier does, so
-            # the denial reason and the SEL event still map back to the rule id.
+            # the denial reason and the SEL event still map back to the rule id —
+            # plus a second line saying the match was STRUCTURAL, because a floor
+            # hit routinely occurs on input that pattern cannot match and the
+            # bare identifier reads as a false explanation.
             _emit_deny_event(tool_name, pattern, lower)
-            return _reason(pattern)
+            return _reason(pattern, _SELF_PROTECTION_FLOOR_NOTES.get(rule_id, ""))
 
     # ── Pass 1: whole-string deny ──
     # If any pattern matches the full input AND no exception matches the
