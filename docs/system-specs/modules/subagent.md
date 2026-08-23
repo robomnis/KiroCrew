@@ -29,15 +29,22 @@ or release replay because the legacy effect may already have happened. A
 transport-uncertain caller queries the durable command by key. Machine-coded
 coordinator-unavailable and outcome-uncertain HTTP responses take the same
 lookup path even when HTTP error flattening omits the transport marker; the
-legacy lost-wave endpoint remains for unkeyed compatibility callers. The
-authenticated DELETE endpoint accepts the same additive identity for idempotent
-cancellation.
+pending execution and control lookup remain explicit errors until their stored
+results are terminal, while a stored manager rejection retains `counted: true`
+for wave accounting. When the lookup follows transport uncertainty,
+`command_pending`
+preserves that uncertainty and never enters lost-wave accounting because the
+gateway may still apply it. The legacy lost-wave endpoint remains for unkeyed
+compatibility callers. The authenticated DELETE endpoint accepts the same
+additive identity for idempotent cancellation.
 
 The command fence has its own expiry and monotonic claim epoch. Expiry makes a
 command eligible for takeover; it does not discard a completed side effect's
 matching result unless a newer claimant has actually advanced the epoch.
 Control commands therefore never acquire, renew, or invalidate the live
 executor's run lease.
+Ordinary controls use a short claim; cancellation alone uses a 22-minute claim
+because its manager effect includes the bounded 20-minute parent-delivery wait.
 Rejected legacy admission is durably reflected as a rejected command and failed
 terminal run. A claimed execution with an uncertain crash is not automatically
 replayed. Accepted keyed runs carry `_coordinator_admitted`, preventing `_run`
@@ -57,11 +64,32 @@ the HTTP response is explicitly transport-uncertain and counted. The MCP caller
 resolves the stable idempotency key and never records the live member as a lost
 submission.
 
+The command result has one durable ownership rule. `_run` may mark an execution
+command applied with an empty result when it wins the child-start race; the same
+command fence may then fill that empty result exactly once while its run lease
+still has the same owner and epoch. Recovery takeover fences a late fill, and
+conflicting results remain rejected. If the synchronous manager facade rejects
+or raises, the authority retains the failed facade result until it commits the
+failed run and outbox event atomically, then stores the applied response. A
+retry resumes a failed terminal commit without invoking the manager again. If
+the response fill fails after the terminal commit, the counted response still
+returns and later replays derive the failure from the terminal run. A
+command-only rejection never terminalizes a run without an outbox event.
+After restart, a terminal failed, stopped, or interrupted run takes precedence
+over an empty command result, so an exact POST replay cannot report an already
+terminal execution as newly spawned.
+
 An exact execution claim also acquires the run lease. The authority passes its
 run fence, command, and optimistic version through the synchronous facade and
 queue payload. `_run` commits `starting` before child startup, `_run_inner`
 commits `running` after session creation and before the prompt, and a 30-second
-heartbeat renews the 90-second lease. Control claims still never touch it.
+heartbeat renews the 90-second lease. A queued or approval-gated keyed execution
+starts an authority-owned heartbeat as soon as the synchronous facade returns
+its waiting record, closing the pre-execution wait before `_run` explicitly
+takes over lifecycle renewal. Queue cancellation, queue-drain rejection, and
+approval denial stop that heartbeat by committing and delivering a terminal
+coordinator outcome. Orderly shutdown cancels both heartbeat owners. Control
+claims still never touch the execution lease.
 
 The port defines typed desired/observed state, terminal outcomes, idempotent
 commands, execution leases with fencing epochs, optimistic lifecycle versions,
@@ -147,23 +175,44 @@ routing metadata, a 4,000-character result summary, and `result_path`; it never
 copies the full transcript. Replaying the completion returns the same
 `event_id`; a conflicting outcome is rejected.
 
-`OutboxDeliveryAdapter` claims one FIFO event immediately before each delivery,
-increments the delivery claim epoch, and invokes existing gateway routing. Its
-22-minute lease covers the bounded parent-injection and teardown budgets, so a
-valid slow callback cannot be claimed concurrently. It acknowledges only after
-that callback accepts the event; an injection callback that records a routing
-failure leaves the event pending even when it returns normally. Exceptions
-release the matching claim with bounded, overflow-safe exponential backoff. A
-permanently rejected execution fence stops its
-reporter; periodic recovery owns the nonterminal run rather than an impossible
-retry loop or a duplicate legacy delivery. A queued or immediately dispatched
-dashboard turn and a wave-digest hold defer acknowledgement instead: the event
-remains unavailable to background drainers for one lease window, and the
-consumption/digest-settlement hooks acknowledge every terminal outcome only
-after the parent consumes it. If that acknowledgement races the adapter's
-release of the original claim, it reclaims the stable event identity and
-settles the new fence. Legacy delivered tombstones remain limited to successful
-runs, while teardown gates retain their compatibility role.
+A synchronous non-batch facade rejection is itself the delivery path: its
+terminal transaction inserts the event already delivered, and the HTTP response
+returns the counted error without invoking the parent completion callback.
+Batch rejections remain pending, preserve `batch_id` and `batch_total`, and are
+routed through the ordinary completion consumer so they settle their wave. The
+live authority handoff supplies that batch identity to the manager's first
+delivery context; durable labels alone never reconstruct volatile digest state
+after restart. Exception-derived rejections also retain the caller's `silent`
+delivery policy in their durable payload.
+
+`OutboxDeliveryAdapter` drains a bounded FIFO batch by claiming each event only
+when its destination is about to run, or claims one exact event. Each claim
+increments the delivery epoch before invoking existing gateway routing. It
+acknowledges only after that callback accepts the event; an injection callback
+that records a routing failure leaves the event pending even when it returns
+normally. Exceptions release the matching claim with bounded, overflow-safe
+exponential backoff. The default 22-minute claim covers the 20-minute
+parent-injection cap plus teardown, and the adapter never holds its local claim
+lock while invoking routing, so routing may acknowledge the same event without
+deadlock. A dashboard queue or wave-digest hold defers instead: the event stays
+pending but is unavailable to ordinary drainers for one lease window;
+queue-consumption/digest-settlement hooks can claim it explicitly and
+acknowledge that exact stable identity immediately. If acknowledgement races
+the adapter's release of the original claim, it reclaims the stable event
+identity and settles the new fence. Deferred manager contexts survive retries,
+preventing repeated WebSocket, parent-callback, or wave-accounting effects.
+Legacy delivered tombstones and teardown gates remain compatibility mirrors and
+retention guards.
+Pre-start queue cancellation, queue-drain rejection, and approval denial use
+the same digest-settlement path as ordinary terminal execution, so the event
+that closes a batch also acknowledges siblings already held by that digest.
+A permanently rejected execution fence stops its reporter; periodic recovery
+owns the nonterminal run rather than an impossible retry loop or a duplicate
+legacy delivery. Both queued and immediately dispatched dashboard turns defer
+acknowledgement until the model consumes the prompt. The consumption and digest
+settlement hooks acknowledge every terminal outcome, while legacy delivered
+tombstones remain limited to successful runs so failed and stopped artifacts
+keep their post-mortem retention window.
 
 Delivery retries retain their manager context. Lifecycle events, orchestration
 tracking, and wave accounting run once; every composed wave chunk keeps a
@@ -680,13 +729,19 @@ Startup is coordinator-first:
    legacy `state.json` mirror remains best-effort. Shared
    sessions persist the runtime PID for attribution but mark it non-owned and
    never persist a kill-authorizing start identity, because that process also
-   hosts the parent and other sessions. A live owned child with an unreadable,
-   missing, or mismatched identity leaves the run nonterminal and is never
-   signalled; recovery retries after the lease expires. Every successful
-   recovery termination emits the same `orphan_reconcile_kill` SEL audit as the
-   compatibility orphan scanner.
+   hosts the parent and other sessions. On Windows the compatibility layer
+   keeps the verified process handle pinned across tree termination so PID
+   reuse cannot retarget the signal. A live owned child with an unreadable,
+   missing, or mismatched identity is never signalled. An identity change or
+   termination error leaves the coordinator run nonterminal for a later fenced
+   recovery attempt; it is never recorded interrupted while the child may still
+   be live. Every successful recovery termination emits the same
+   `orphan_reconcile_kill` SEL audit as the compatibility orphan scanner.
 4. The claimed run becomes `interrupted`; any partial `result.txt` path is
-   retained. Recovery never claims or replays its execution command.
+   retained. Recovery never claims or replays its execution command. When its
+   command has no stored facade result, keyed lookup derives an explicit
+   `run_interrupted` response from this terminal row instead of reporting the
+   command as pending or spawned.
 5. Coordinator-authenticated terminal pending outbox events drain independently
    through the same fenced delivery adapter. Legacy tombstones create no outbox
    event and therefore cannot route a completion from their untrusted metadata.

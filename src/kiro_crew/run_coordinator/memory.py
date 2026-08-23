@@ -225,6 +225,17 @@ class MemoryRunCoordinator:
         """Create a legacy-only run without manufacturing an execution command."""
 
         async with self._lock:
+            terminal = request.observed_state is ObservedState.TERMINAL
+            if terminal != (request.outcome is not None):
+                return self._result(
+                    CoordinatorDecision.REJECTED,
+                    CoordinatorReason.INVALID_TRANSITION,
+                )
+            if bool(request.event_type) != bool(request.delivery_state):
+                return self._result(
+                    CoordinatorDecision.REJECTED,
+                    CoordinatorReason.INVALID_TRANSITION,
+                )
             existing = self._runs.get(request.run_id)
             if existing is not None:
                 event_id = self._outbox_by_run_type.get((request.run_id, request.event_type))
@@ -250,17 +261,6 @@ class MemoryRunCoordinator:
                     CoordinatorDecision.UNCHANGED,
                     CoordinatorReason.IDEMPOTENT_REPLAY,
                     LegacyImportReceipt(existing, existing_event, created=False),
-                )
-            terminal = request.observed_state is ObservedState.TERMINAL
-            if terminal != (request.outcome is not None):
-                return self._result(
-                    CoordinatorDecision.REJECTED,
-                    CoordinatorReason.INVALID_TRANSITION,
-                )
-            if bool(request.event_type) != bool(request.delivery_state):
-                return self._result(
-                    CoordinatorDecision.REJECTED,
-                    CoordinatorReason.INVALID_TRANSITION,
                 )
             run = RunRecord(
                 run_id=request.run_id,
@@ -511,6 +511,37 @@ class MemoryRunCoordinator:
             )
             if command.status in (CommandStatus.APPLIED, CommandStatus.REJECTED):
                 if matching:
+                    result_fill = (
+                        command.status is CommandStatus.APPLIED
+                        and status is CommandStatus.APPLIED
+                        and not command.rejection_reason
+                        and not command.result_json
+                        and not rejection_reason
+                        and bool(result_json)
+                    )
+                    if result_fill and command.operation in _EXECUTION_COMMANDS:
+                        run = self._runs.get(command.run_id)
+                        if (
+                            run is None
+                            or run.owner_id != command.owner_id
+                            or run.lease_epoch != command.lease_epoch
+                        ):
+                            return self._result(
+                                CoordinatorDecision.REJECTED,
+                                CoordinatorReason.STALE_FENCE,
+                            )
+                    if result_fill:
+                        command = replace(
+                            command,
+                            result_json=result_json,
+                            updated_at=self._clock(),
+                        )
+                        self._commands[command.command_id] = command
+                        return self._result(
+                            CoordinatorDecision.APPLIED,
+                            CoordinatorReason.TRANSITIONED,
+                            command,
+                        )
                     if (
                         command.status is not status
                         or command.rejection_reason != rejection_reason
@@ -541,19 +572,6 @@ class MemoryRunCoordinator:
                 updated_at=self._clock(),
             )
             self._commands[command.command_id] = command
-            if status is CommandStatus.REJECTED and command.operation in _EXECUTION_COMMANDS:
-                run = self._runs.get(command.run_id)
-                if run is not None and run.observed_state in _STARTABLE_STATES:
-                    now = self._clock()
-                    self._runs[run.run_id] = replace(
-                        run,
-                        observed_state=ObservedState.TERMINAL,
-                        outcome=RunOutcome.FAILED,
-                        error=rejection_reason,
-                        version=run.version + 1,
-                        updated_at=now,
-                        terminal_at=now,
-                    )
             return self._result(
                 CoordinatorDecision.APPLIED,
                 CoordinatorReason.TRANSITIONED,
@@ -754,14 +772,16 @@ class MemoryRunCoordinator:
                 destination=completion.destination,
                 event_type=completion.event_type,
                 payload_json=completion.payload_json,
-                status=DeliveryState.PENDING,
+                status=completion.delivery_state,
                 attempts=0,
                 available_at=now,
                 claim_owner="",
                 claim_expires_at=0.0,
                 claim_epoch=0,
                 created_at=now,
-                delivered_at=None,
+                delivered_at=(
+                    now if completion.delivery_state is DeliveryState.DELIVERED else None
+                ),
             )
             self._outbox[event.event_id] = event
             self._outbox_by_run_type[key] = event.event_id

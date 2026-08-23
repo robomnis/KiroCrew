@@ -201,6 +201,33 @@ async def test_startup_reconciliation_drains_completion_committed_before_restart
 
 
 @pytest.mark.asyncio
+async def test_live_coordinator_delivery_retains_batch_context() -> None:
+    clock = _Clock()
+    coordinator = MemoryRunCoordinator(clock=clock, id_factory=lambda: "event-live-batch")
+    event = await _completed_event(coordinator, clock, "run-live-batch")
+    delivered: list[tuple[str, int, str]] = []
+
+    async def capture(info: SubagentInfo) -> None:
+        delivered.append((info.batch_id, info.batch_total, info._delivery_event_id))
+
+    manager = SubagentManager(
+        sessions=MagicMock(),
+        ctx_builder=MagicMock(),
+        on_done=capture,
+        coordinator=coordinator,
+    )
+
+    await manager.deliver_coordinator_event(
+        event.event_id,
+        batch_id="wave-live",
+        batch_total=3,
+    )
+
+    assert delivered == [("wave-live", 3, event.event_id)]
+    assert coordinator._outbox[event.event_id].status is DeliveryState.DELIVERED
+
+
+@pytest.mark.asyncio
 async def test_startup_reconciliation_does_not_reprocess_deferred_outbox_as_orphan(
     monkeypatch,
 ) -> None:
@@ -666,6 +693,31 @@ async def test_digest_held_failed_event_acks_without_legacy_delivered_tombstone(
 
 
 @pytest.mark.asyncio
+async def test_deferred_manager_event_does_not_repeat_parent_callbacks() -> None:
+    clock = _Clock()
+    coordinator = MemoryRunCoordinator(clock=clock, id_factory=lambda: "event-1")
+    event = await _completed_event(coordinator, clock, "run-1")
+    calls = 0
+
+    async def defer(info: SubagentInfo) -> None:
+        nonlocal calls
+        calls += 1
+        info._delivery_queued = True
+
+    manager = SubagentManager(
+        sessions=MagicMock(),
+        ctx_builder=MagicMock(),
+        on_done=defer,
+        coordinator=coordinator,
+    )
+
+    await manager._outbox_delivery.drain_once(event_id=event.event_id)
+    await manager._outbox_delivery.drain_once(event_id=event.event_id)
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_cancelled_coordinator_queue_entry_commits_stopped_outcome() -> None:
     clock = _Clock()
     coordinator = MemoryRunCoordinator(clock=clock, id_factory=lambda: "event-1")
@@ -719,6 +771,73 @@ async def test_cancelled_coordinator_queue_entry_commits_stopped_outcome() -> No
     assert run.observed_state.value == "terminal"
     assert run.outcome is RunOutcome.STOPPED
     on_done.assert_awaited_once()
+    manager._settle_digest_holds.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_queue_drain_rejection_commits_coordinator_terminal_outcome() -> None:
+    clock = _Clock()
+    coordinator = MemoryRunCoordinator(clock=clock, id_factory=lambda: "event-1")
+    submitted = await coordinator.submit(
+        SubmitRun(
+            run_id="run-1",
+            command_id="command-1",
+            idempotency_key="key-1",
+            payload_hash="hash-1",
+            payload_json="{}",
+            parent_session="dashboard:parent",
+            agent="reviewer",
+            task="inspect",
+            conversation_key="",
+            operation=CommandOperation.SPAWN,
+        )
+    )
+    assert submitted.value is not None
+    claim = await coordinator.claim_command(
+        "command-1",
+        OwnerLease("executor", clock.value + 90),
+    )
+    assert claim is not None and claim.run is not None and claim.fence is not None
+    manager = SubagentManager(
+        sessions=MagicMock(),
+        ctx_builder=MagicMock(),
+        on_done=AsyncMock(),
+        coordinator=coordinator,
+    )
+    manager._queue = [
+        {
+            "task": "inspect",
+            "agent": "reviewer",
+            "parent_session_key": "dashboard:parent",
+            "batch_id": "batch-1",
+            "batch_total": 2,
+            "_preassigned_id": "run-1",
+            "_coordinator_admitted": True,
+            "_coordinator_command": claim.command,
+            "_coordinator_fence": claim.fence,
+            "_coordinator_version": claim.run.version,
+        }
+    ]
+    manager._settle_digest_holds = AsyncMock()  # type: ignore[method-assign]
+    manager._spawn_stagger_secs = 0.0
+    manager._last_spawn_ts = 0.0
+    manager.spawn = MagicMock(
+        return_value=SubagentInfo(
+            id="run-1",
+            task="inspect",
+            parent_session_key="dashboard:parent",
+            done=True,
+            error="agent disappeared while queued",
+        )
+    )
+
+    manager._drain_queue()
+    await manager._tasks["reject-run-1"]
+
+    run = await coordinator.get_run("run-1")
+    assert run is not None
+    assert run.observed_state.value == "terminal"
+    assert run.outcome is RunOutcome.FAILED
     manager._settle_digest_holds.assert_awaited_once()
 
 

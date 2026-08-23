@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
@@ -17,18 +18,31 @@ from dataclasses import dataclass
 from typing import Any, TypeVar, cast
 
 from .run_coordinator.models import (
+    CommandClaim,
     CommandFence,
     CommandOperation,
     CommandStatus,
     CoordinatorDecision,
+    DeliveryState,
+    ObservedState,
     OwnerLease,
+    RunCompletion,
     RunCoordinator,
+    RunFence,
+    RunOutcome,
+    RunRecord,
     SubmitControl,
     SubmitRun,
 )
+from .security import redact_credentials, redact_exfiltration_urls
 
 _CONTROL_LEASE_SECS = 30.0
+# Cancellation includes the manager's bounded 20-minute parent-delivery wait.
+# The extra two minutes cover termination and the durable finish write without
+# forcing unrelated control commands to remain claimed after a gateway crash.
+_CANCEL_CONTROL_LEASE_SECS = 22.0 * 60.0
 EXECUTION_LEASE_SECONDS = 90.0
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -49,6 +63,18 @@ class AdmittedExecution:
     done: bool = False
     error: str = ""
     queued: bool = False
+    batch_id: str = ""
+    batch_total: int = 0
+    silent: bool = False
+
+
+@dataclass(frozen=True)
+class _PendingExecutionFailure:
+    result: Any
+    claim: CommandClaim
+    run: RunRecord
+    batch_id: str
+    batch_total: int
 
 
 class AuthorityError(RuntimeError):
@@ -68,6 +94,12 @@ class AuthorityOutcomeUncertain(AuthorityUnavailable):
 
 
 _T = TypeVar("_T")
+
+
+def _redact(value: str) -> str:
+    value, _ = redact_exfiltration_urls(value)
+    value, _ = redact_credentials(value)
+    return value
 
 
 class SubagentCommandAuthority:
@@ -97,6 +129,7 @@ class SubagentCommandAuthority:
         # starts them. Retain the accepted facade result for keyed replays.
         self._execution_results: dict[str, Any] = {}
         self._waiting_executions: dict[str, tuple[CommandFence, str]] = {}
+        self._pending_execution_failures: dict[str, _PendingExecutionFailure] = {}
         self._lease_tasks: dict[str, asyncio.Task[None]] = {}
 
     @staticmethod
@@ -167,6 +200,34 @@ class SubagentCommandAuthority:
         stored: AdmittedExecution | None = None
         if command.result_json:
             stored = cls._decode_execution_result(command.result_json, run_id, task)
+        run = receipt.run
+        if (
+            not command.result_json
+            and run is not None
+            and run.observed_state is ObservedState.TERMINAL
+            and run.outcome is not None
+            and run.outcome is not RunOutcome.COMPLETED
+        ):
+            return {
+                "found": True,
+                "id": run_id,
+                "error": run.error or f"run ended {run.outcome.value}",
+                "code": f"run_{run.outcome.value}",
+                "counted": True,
+            }
+        if stored is not None and stored.done and stored.error:
+            code = (
+                cls._continue_error_code(stored.error)
+                if command.operation is CommandOperation.CONTINUE
+                else "spawn_rejected"
+            )
+            return {
+                "found": True,
+                "id": run_id,
+                "error": stored.error,
+                "code": code,
+                "counted": True,
+            }
         if command.status is CommandStatus.REJECTED:
             error = (
                 stored.error
@@ -222,6 +283,7 @@ class SubagentCommandAuthority:
                 return {
                     "found": True,
                     "id": target,
+                    "error": "command outcome is still pending",
                     "status": "pending",
                     "code": "command_pending",
                 }
@@ -357,6 +419,26 @@ class SubagentCommandAuthority:
             if receipt.run is None:
                 raise AuthorityUnavailable("execution receipt omitted the run record")
             if not receipt.created:
+                if (
+                    not receipt.command.result_json
+                    and receipt.run.observed_state is ObservedState.TERMINAL
+                    and receipt.run.outcome is not None
+                    and receipt.run.outcome is not RunOutcome.COMPLETED
+                ):
+                    self._pending_execution_failures.pop(receipt.command.command_id, None)
+                    self._execution_results.pop(receipt.run.run_id, None)
+                    return AdmittedExecution(
+                        receipt.run.run_id,
+                        receipt.run.task,
+                        done=True,
+                        error=receipt.run.error or f"run ended {receipt.run.outcome.value}",
+                    )
+                pending_failure = self._pending_execution_failures.get(receipt.command.command_id)
+                if pending_failure is not None:
+                    return await self._persist_execution_failure(
+                        receipt.command.command_id,
+                        pending_failure,
+                    )
                 if receipt.run.run_id in self._execution_results:
                     return self._execution_results[receipt.run.run_id]
                 replay = self._manager.get(receipt.run.run_id)
@@ -402,12 +484,27 @@ class SubagentCommandAuthority:
                 else:
                     local_result = self._manager.spawn(task, **call_kwargs)
             except BaseException as exc:
-                await self._coordinator.finish_command(
-                    claim.command_fence,
-                    CommandStatus.REJECTED,
-                    rejection_reason=type(exc).__name__,
+                local_result = AdmittedExecution(
+                    receipt.run.run_id,
+                    receipt.run.task,
+                    done=True,
+                    error=_redact(str(exc) or type(exc).__name__),
+                    batch_id=str(kwargs.get("batch_id") or ""),
+                    batch_total=int(kwargs.get("batch_total") or 0),
+                    silent=bool(kwargs.get("silent")),
                 )
-                raise
+                pending_failure = _PendingExecutionFailure(
+                    local_result,
+                    claim,
+                    receipt.run,
+                    local_result.batch_id,
+                    local_result.batch_total,
+                )
+                self._pending_execution_failures[receipt.command.command_id] = pending_failure
+                return await self._persist_execution_failure(
+                    receipt.command.command_id,
+                    pending_failure,
+                )
             waiting = bool(
                 getattr(
                     local_result,
@@ -426,29 +523,155 @@ class SubagentCommandAuthority:
                 )
                 self._start_execution_heartbeat(receipt.run.run_id, claim.fence)
                 return local_result
-            status = (
-                CommandStatus.APPLIED
-                if self._execution_succeeded(local_result)
-                else CommandStatus.REJECTED
-            )
-            try:
-                finished = await self._coordinator.finish_command(
-                    claim.command_fence,
-                    status,
-                    rejection_reason=("" if status is CommandStatus.APPLIED else "legacy_rejected"),
-                    result_json=result_json,
+            if not self._execution_succeeded(local_result):
+                pending_failure = _PendingExecutionFailure(
+                    local_result,
+                    claim,
+                    receipt.run,
+                    str(getattr(local_result, "batch_id", "") or kwargs.get("batch_id") or ""),
+                    int(getattr(local_result, "batch_total", 0) or kwargs.get("batch_total") or 0),
                 )
-            except Exception as exc:
-                raise AuthorityOutcomeUncertain(
-                    "execution result was not durably finished"
-                ) from exc
-            if finished.decision is CoordinatorDecision.REJECTED:
-                raise AuthorityOutcomeUncertain(
-                    f"execution result was not durably finished: {self._reason(finished)}"
+                self._pending_execution_failures[receipt.command.command_id] = pending_failure
+                return await self._persist_execution_failure(
+                    receipt.command.command_id,
+                    pending_failure,
                 )
+            await self._finish_execution_result(claim, result_json)
             return local_result
 
         return await self._coalesce(identity, payload_hash, admit)
+
+    async def _persist_execution_failure(
+        self,
+        command_id: str,
+        pending: _PendingExecutionFailure,
+    ) -> Any:
+        event_id = await self._complete_execution_failure(
+            pending.claim,
+            pending.run,
+            pending.result,
+            batch_id=pending.batch_id,
+            batch_total=pending.batch_total,
+        )
+        result_json = self._encode_execution_result(pending.result, pending.run.run_id)
+        try:
+            await self._finish_execution_result(pending.claim, result_json)
+        except Exception:
+            # The terminal run and its outbox event are already durable.  A
+            # command-result fill is useful for exact response reconstruction,
+            # but it cannot turn that counted terminal outcome back into an
+            # uncounted transport failure.  Replays fall back to the terminal
+            # run when this best-effort fill is unavailable.
+            logger.exception(
+                "Failed to store the facade result for terminal run %s",
+                pending.run.run_id,
+            )
+        self._execution_results.pop(pending.run.run_id, None)
+        self._pending_execution_failures.pop(command_id, None)
+        if pending.batch_id:
+            try:
+                await self._deliver_execution_failure(
+                    event_id,
+                    batch_id=pending.batch_id,
+                    batch_total=pending.batch_total,
+                )
+            except Exception:
+                logger.exception(
+                    "Durable batch rejection delivery failed for event %s",
+                    event_id,
+                )
+        return pending.result
+
+    async def _finish_execution_result(self, claim: Any, result_json: str) -> None:
+        try:
+            finished = await self._coordinator.finish_command(
+                claim.command_fence,
+                CommandStatus.APPLIED,
+                result_json=result_json,
+            )
+        except Exception as exc:
+            raise AuthorityOutcomeUncertain("execution result was not durably finished") from exc
+        if finished.decision is CoordinatorDecision.REJECTED:
+            raise AuthorityOutcomeUncertain(
+                f"execution result was not durably finished: {self._reason(finished)}"
+            )
+
+    async def _complete_execution_failure(
+        self,
+        claim: CommandClaim,
+        run: RunRecord,
+        local_result: Any,
+        *,
+        batch_id: str,
+        batch_total: int,
+    ) -> str:
+        if claim.fence is None:
+            raise AuthorityUnavailable("execution failure omitted its run fence")
+        prepare = getattr(self._manager, "prepare_coordinator_rejection", None)
+        if callable(prepare):
+            prepare(run.run_id)
+        error = _redact(str(getattr(local_result, "error", "") or "manager rejected execution"))
+        task = _redact(run.task)
+        payload_json = json.dumps(
+            {
+                "id": run.run_id,
+                "parent_session_key": run.parent_session,
+                "agent": run.agent,
+                "task": task[:1000],
+                "outcome": RunOutcome.FAILED.value,
+                "error": error[:2000],
+                "result_path": str(getattr(local_result, "result_path", "") or ""),
+                "result_summary": "",
+                "result_truncated": False,
+                "user_stopped": False,
+                "silent": bool(getattr(local_result, "silent", False)),
+                "batch_id": batch_id,
+                "batch_total": batch_total,
+                "elapsed": float(getattr(local_result, "elapsed", 0.0) or 0.0),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        try:
+            completed = await self._coordinator.complete(
+                RunCompletion(
+                    run_id=run.run_id,
+                    outcome=RunOutcome.FAILED,
+                    result_path=str(getattr(local_result, "result_path", "") or ""),
+                    error=error,
+                    event_type="subagent_completion",
+                    destination=run.parent_session,
+                    payload_json=payload_json,
+                    terminal_at=self._clock(),
+                    delivery_state=(DeliveryState.PENDING if batch_id else DeliveryState.DELIVERED),
+                ),
+                claim.fence,
+                run.version,
+            )
+        except Exception as exc:
+            raise AuthorityOutcomeUncertain(
+                "execution rejection was not durably completed"
+            ) from exc
+        if completed.value is None or completed.decision is CoordinatorDecision.REJECTED:
+            raise AuthorityOutcomeUncertain(
+                f"execution rejection was not durably completed: {self._reason(completed)}"
+            )
+        return completed.value.event_id
+
+    async def _deliver_execution_failure(
+        self,
+        event_id: str,
+        *,
+        batch_id: str,
+        batch_total: int,
+    ) -> None:
+        deliver = getattr(self._manager, "deliver_coordinator_event", None)
+        if callable(deliver):
+            await deliver(
+                event_id,
+                batch_id=batch_id,
+                batch_total=batch_total,
+            )
 
     async def steer(self, identity: CommandIdentity, run_id: str, message: str) -> tuple[bool, str]:
         payload = {"message": message, "mode": "interrupt"}
@@ -547,7 +770,13 @@ class SubagentCommandAuthority:
 
             claim = await self._coordinator.claim_command(
                 identity.command_id,
-                self._owner_lease(),
+                self._owner_lease(
+                    control_seconds=(
+                        _CANCEL_CONTROL_LEASE_SECS
+                        if operation is CommandOperation.CANCEL
+                        else _CONTROL_LEASE_SECS
+                    )
+                ),
             )
             if claim is None:
                 latest = await self._coordinator.get_command_by_key(identity.idempotency_key)
@@ -588,7 +817,7 @@ class SubagentCommandAuthority:
 
         return await self._coalesce(identity, payload_hash, admit_and_apply)
 
-    def _start_execution_heartbeat(self, run_id: str, fence: Any) -> None:
+    def _start_execution_heartbeat(self, run_id: str, fence: RunFence) -> None:
         if run_id in self._lease_tasks:
             return
 
@@ -659,11 +888,16 @@ class SubagentCommandAuthority:
                 )
         await self.stop_execution_heartbeat(run_id)
 
-    def _owner_lease(self, *, execution: bool = False) -> OwnerLease:
+    def _owner_lease(
+        self,
+        *,
+        execution: bool = False,
+        control_seconds: float = _CONTROL_LEASE_SECS,
+    ) -> OwnerLease:
         return OwnerLease(
             owner_id=self._owner_id,
             lease_expires_at=self._clock()
-            + (EXECUTION_LEASE_SECONDS if execution else _CONTROL_LEASE_SECS),
+            + (EXECUTION_LEASE_SECONDS if execution else control_seconds),
         )
 
     @staticmethod
@@ -681,7 +915,7 @@ class SubagentCommandAuthority:
                 "has_info": True,
                 "id": str(getattr(result, "id", run_id) or run_id),
                 "done": bool(getattr(result, "done", False)),
-                "error": str(getattr(result, "error", "") or ""),
+                "error": _redact(str(getattr(result, "error", "") or "")),
                 "queued": bool(getattr(result, "queued", False)),
             }
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
