@@ -140,7 +140,10 @@ describe('slot teardown parity', () => {
       followups: Object.fromEntries(keys.map(k => [k, { items: [], ts: 1 }])),
       folderSuggestions: Object.fromEntries(keys.map(k => [k, { folderId: 'f', folderName: 'F', breadcrumb: 'F', ts: 1 }])),
       subagentQueued: Object.fromEntries(keys.map(k => [k, 2])),
-      goalLoops: Object.fromEntries(keys.map(k => [k, { cycle_count: 1, max_cycles: 5 }])),
+      automations: Object.fromEntries(keys.map(k => [k, {
+        kind: 'legacy_goal_loop', id: `loop-${k}`, slotKey: k, message: '', idleSecs: 60,
+        maxCycles: 5, cycleCount: 1, active: true, lastFireAt: 0, stoppedReason: '',
+      }])),
       slotPaneHasMore: Object.fromEntries(keys.map(k => [k, true])),
       slotPaneBounded: Object.fromEntries(keys.map(k => [k, 50])),
     }
@@ -149,7 +152,7 @@ describe('slot teardown parity', () => {
   const perSlotMaps = [
     'slotMessages', 'slotActivity', 'slotRun', 'slotHydrated', 'slotSide',
     'slotSideClosed', 'slotStatusDetail', 'slotContextPct', 'slotContextTokens',
-    'stopPressedAt', 'followups', 'folderSuggestions', 'subagentQueued', 'goalLoops',
+    'stopPressedAt', 'followups', 'folderSuggestions', 'subagentQueued', 'automations',
     'slotPaneHasMore', 'slotPaneBounded',
   ] as const
 
@@ -181,7 +184,7 @@ describe('slot teardown parity', () => {
    *  the safe-keyed maps, or a slot whose only residue lives there is never
    *  visited and survives that path. */
   it('the reconcile evicts a slot whose only residue is in a safe-keyed map', () => {
-    const state = { ...seeded(['chat-1']), subagentQueued: { ghost: 3 }, goalLoops: {}, pendingQuestions: {} }
+    const state = { ...seeded(['chat-1']), subagentQueued: { ghost: 3 }, automations: {}, pendingQuestions: {} }
     const next = chatReducer(state, sseSlots([slot('chat-1')]))
     expect(next.subagentQueued['ghost']).toBeUndefined()
   })
@@ -193,7 +196,7 @@ describe('slot teardown parity', () => {
   })
 
   it('keeps a live slot that is only present in a safe-keyed map', () => {
-    const state = { ...seeded(['chat-1']), subagentQueued: { 'chat-1': 3 }, goalLoops: {}, pendingQuestions: {} }
+    const state = { ...seeded(['chat-1']), subagentQueued: { 'chat-1': 3 }, automations: {}, pendingQuestions: {} }
     const next = chatReducer(state, sseSlots([slot('chat-1')]))
     expect(next.subagentQueued['chat-1']).toBe(3)
   })
