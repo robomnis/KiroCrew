@@ -2681,6 +2681,7 @@ async def _handle_connection(
                     backend,
                     inbox,
                     writer_task,
+                    caller=caller,
                 )
                 if recovered is None:
                     # Genuinely unrecoverable (no captured init, circuit
@@ -2901,6 +2902,7 @@ async def _respawn_backend_for_stub(
     old_backend: Backend,
     old_inbox: Optional["asyncio.Queue[bytes]"],
     old_writer_task: Optional[asyncio.Task[None]],
+    caller: Optional[CallerContext] = None,
 ) -> Optional[tuple[Backend, "asyncio.Queue[bytes]", asyncio.Task[None]]]:
     """Rebuild a fresh backend for ``stub_uuid`` after its shared backend
     died and re-bind this stub to it transparently.
@@ -2941,6 +2943,13 @@ async def _respawn_backend_for_stub(
                 # catch a hang). Mirrors _write_json_line's bounded drain.
                 await asyncio.wait_for(writer.drain(), timeout=_WRITE_REPLY_TIMEOUT_SECS)
 
+    # Captured BEFORE detach (which prunes them): the URIs whose live
+    # subscriptions must be replayed onto the replacement backend, or they
+    # silently go dark — kiro-cli never learns the old backend died, so it
+    # will never re-subscribe on its own.
+    replay_uris: list[str] = []
+    with contextlib.suppress(Exception):
+        replay_uris = old_backend.resource_subscription_uris(stub_uuid)
     with contextlib.suppress(Exception):
         await old_backend.detach_stub(stub_uuid)
 
@@ -2995,6 +3004,13 @@ async def _respawn_backend_for_stub(
             )
             return None
         new_inbox = await new_backend.attach_stub(stub_uuid)
+        if replay_uris:
+            # Best-effort: a refusal or write failure leaves the update
+            # undelivered (fail-closed) rather than mis-attributed.
+            with contextlib.suppress(Exception):
+                await new_backend.replay_resource_subscriptions(
+                    stub_uuid, replay_uris, caller=caller
+                )
     finally:
         # A private backend never took a reservation, and releasing one would
         # decrement a POOLED connection sharing this digest (see
